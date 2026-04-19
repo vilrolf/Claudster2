@@ -601,6 +601,7 @@ func (m Model) openInTerminal() (tea.Model, tea.Cmd) {
 	return m, func() tea.Msg {
 		out, err := exec.Command("tmux", "display-popup",
 			"-E", "-d", expanded,
+			"-T", " ctrl-d to close ",
 			"-w", "80%", "-h", "80%",
 			shell,
 		).CombinedOutput()
