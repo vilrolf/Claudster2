@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -10,6 +11,9 @@ import (
 func renderModal(m Model) string {
 	if m.modal.mode == modalConfirmDelete {
 		return renderConfirmDelete(m)
+	}
+	if m.modal.mode == modalHelp {
+		return renderHelp(m)
 	}
 
 	var title, fieldLabel, hint string
@@ -49,6 +53,81 @@ func renderModal(m Model) string {
 		HelpDesc.Render("enter  confirm    esc  cancel"),
 	)
 
+	return lipgloss.Place(m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		OverlayStyle.Render(body),
+	)
+}
+
+func renderHelp(m Model) string {
+	type binding struct{ key, desc string }
+	sections := []struct {
+		title    string
+		bindings []binding
+	}{
+		{"Navigate", []binding{
+			{"j / ↓", "move down"},
+			{"k / ↑", "move up"},
+			{"space", "expand / collapse project"},
+		}},
+		{"Sessions", []binding{
+			{"enter", "attach or start session"},
+			{"n", "new Claude session"},
+			{"T", "new terminal session (persistent)"},
+			{"V", "new editor session (persistent)"},
+			{"d", "delete session (confirm required)"},
+			{"P", "restart Claude session"},
+		}},
+		{"Quick open", []binding{
+			{"v", "open repo in editor"},
+			{"t", "open repo in terminal"},
+			{"G", "open repo in lazygit"},
+		}},
+		{"Project / config", []binding{
+			{"N", "new project"},
+			{"e", "edit config file"},
+		}},
+		{"UI", []binding{
+			{"[ / ]", "resize sidebar"},
+			{"p", "toggle --dangerously-skip-permissions"},
+			{"?", "this help page"},
+			{"q / ctrl+q", "quit"},
+		}},
+	}
+
+	var col1, col2 []string
+	col1 = append(col1, OverlayTitle.Render("Keybindings"), "")
+	col2 = append(col2, "", "")
+
+	for _, sec := range sections {
+		col1 = append(col1, PreviewKey.Render(sec.title))
+		col2 = append(col2, "")
+		for _, b := range sec.bindings {
+			col1 = append(col1, HelpKey.Render("  "+b.key))
+			col2 = append(col2, HelpDesc.Render(b.desc))
+		}
+		col1 = append(col1, "")
+		col2 = append(col2, "")
+	}
+
+	// Pad both columns to equal length
+	for len(col1) < len(col2) {
+		col1 = append(col1, "")
+	}
+	for len(col2) < len(col1) {
+		col2 = append(col2, "")
+	}
+
+	keyW := 24
+	var rows []string
+	for i := range col1 {
+		keyCell := lipgloss.NewStyle().Width(keyW).Render(col1[i])
+		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, keyCell, col2[i]))
+	}
+
+	rows = append(rows, HelpDesc.Render("esc  close"))
+
+	body := strings.Join(rows, "\n")
 	return lipgloss.Place(m.width, m.height,
 		lipgloss.Center, lipgloss.Center,
 		OverlayStyle.Render(body),

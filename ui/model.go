@@ -46,8 +46,9 @@ const (
 	modalNone             modalMode = iota
 	modalNewProject                 // N
 	modalNewSession                 // n
-	modalNewEditorSession           // V / G
+	modalNewEditorSession           // V / G / T
 	modalConfirmDelete              // d
+	modalHelp                       // ?
 )
 
 // modalNewProject only needs one step (group name); the rest is done in $EDITOR.
@@ -102,6 +103,7 @@ type tickMsg time.Time
 type attachDoneMsg struct{ err error }
 type editorDoneMsg struct{}
 type metricsMsg metrics.Stats
+type popupErrMsg string
 
 func New() Model {
 	cfg, cfgErr := store.Load()
@@ -291,6 +293,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case attachDoneMsg:
 		return m, tea.EnableMouseAllMotion
 
+	case popupErrMsg:
+		m.setStatus("popup error: " + string(msg))
+		return m, nil
+
 	case editorDoneMsg:
 		cfg, err := store.Load()
 		if err != nil {
@@ -377,6 +383,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "G":
 		return m.openInLazygit()
+
+	case "t":
+		return m.openInTerminal()
+
+	case "T":
+		return m.startNewToolSession("terminal"), nil
+
+	case "?":
+		m.modal.mode = modalHelp
+		return m, nil
 
 	case "e":
 		editor := os.Getenv("EDITOR")
@@ -468,19 +484,31 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
-		// Bind ctrl+q as a no-prefix detach shortcut for the duration of the
-		// attachment, then remove it when claudster resumes.
-		script := fmt.Sprintf(
-			"tmux bind-key -n C-q detach-client; tmux attach-session -t '%s'; tmux unbind-key -n C-q 2>/dev/null",
-			row.label,
-		)
-		cmd := exec.Command("sh", "-c", script)
-		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-			return attachDoneMsg{err: err}
-		})
+		return m, switchOrAttach(row.label)
 	}
 
 	return m, nil
+}
+
+// switchOrAttach switches to the named session. When running inside tmux it
+// uses switch-client (claudster stays alive in its own window). Outside tmux
+// it falls back to attach-session via ExecProcess.
+func switchOrAttach(name string) tea.Cmd {
+	if os.Getenv("TMUX") != "" {
+		return func() tea.Msg {
+			exec.Command("tmux", "bind-key", "-n", "C-q", "switch-client", "-l").Run()
+			tmux.SwitchTo(name)
+			return nil
+		}
+	}
+	script := fmt.Sprintf(
+		"tmux bind-key -n C-q detach-client; tmux attach-session -t '%s'; tmux unbind-key -n C-q 2>/dev/null",
+		name,
+	)
+	cmd := exec.Command("sh", "-c", script)
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return attachDoneMsg{err: err}
+	})
 }
 
 func (m Model) startNewSession() Model {
@@ -526,8 +554,11 @@ func (m Model) startNewToolSession(kind string) Model {
 	m.modal.targetProject = m.config.Groups[gi].Projects[pi].Name
 	m.modal.targetKind = kind
 	placeholder := "e.g. edit"
-	if kind == "lazygit" {
+	switch kind {
+	case "lazygit":
 		placeholder = "e.g. git"
+	case "terminal":
+		placeholder = "e.g. shell"
 	}
 	m.modal.input.Placeholder = placeholder
 	m.modal.input.SetValue("")
@@ -541,6 +572,43 @@ func (m Model) startNewProject() Model {
 	m.modal.input.SetValue("")
 	m.modal.input.Focus()
 	return m
+}
+
+func (m Model) openInTerminal() (tea.Model, tea.Cmd) {
+	if m.cursor >= len(m.rows) {
+		return m, nil
+	}
+	row := m.rows[m.cursor]
+	var primaryRepo string
+	switch row.typ {
+	case rowTypeProject:
+		primaryRepo = m.config.Groups[row.groupIdx].Projects[row.projectIdx].PrimaryRepo()
+	case rowTypeSession:
+		primaryRepo = m.config.Groups[row.groupIdx].Projects[row.projectIdx].PrimaryRepo()
+	default:
+		m.setStatus("select a project or session first")
+		return m, nil
+	}
+	if os.Getenv("TMUX") == "" {
+		m.setStatus("t requires claudster to be running inside tmux")
+		return m, nil
+	}
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "sh"
+	}
+	expanded := tmux.ExpandPath(primaryRepo)
+	return m, func() tea.Msg {
+		out, err := exec.Command("tmux", "display-popup",
+			"-E", "-d", expanded,
+			"-w", "80%", "-h", "80%",
+			shell,
+		).CombinedOutput()
+		if err != nil {
+			return popupErrMsg(string(out) + ": " + err.Error())
+		}
+		return nil
+	}
 }
 
 func (m Model) openInLazygit() (tea.Model, tea.Cmd) {
@@ -717,10 +785,11 @@ func (m Model) hitTestDashboardCard(absX, absY int) string {
 	hasAnySessions := false
 	for _, g := range m.config.Groups {
 		for _, p := range g.Projects {
-			if len(p.Sessions) > 0 {
-				hasAnySessions = true
-			}
 			for _, s := range p.Sessions {
+				if s.IsToolSession() {
+					continue
+				}
+				hasAnySessions = true
 				if tmux.SessionExists(s.Name) {
 					if m.monitor.Get(s.Name).Status == tmux.StatusWorking {
 						nWorking++
@@ -749,6 +818,9 @@ func (m Model) hitTestDashboardCard(absX, absY int) string {
 		var names []string
 		for _, p := range g.Projects {
 			for _, s := range p.Sessions {
+				if s.IsToolSession() {
+					continue
+				}
 				names = append(names, s.Name)
 			}
 		}
@@ -782,7 +854,7 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
-	case "esc":
+	case "esc", "?":
 		m.modal.mode = modalNone
 		m.modal.input.Blur()
 		return m, nil
@@ -897,14 +969,7 @@ func (m Model) handleModalEnter() (tea.Model, tea.Cmd) {
 			}
 		}
 
-		script := fmt.Sprintf(
-			"tmux bind-key -n C-q detach-client; tmux attach-session -t '%s'; tmux unbind-key -n C-q 2>/dev/null",
-			name,
-		)
-		cmd := exec.Command("sh", "-c", script)
-		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-			return attachDoneMsg{err: err}
-		})
+		return m, switchOrAttach(name)
 
 	case modalNewEditorSession:
 		name := val
@@ -932,6 +997,12 @@ func (m Model) handleModalEnter() (tea.Model, tea.Cmd) {
 		switch kind {
 		case "lazygit":
 			startErr = tmux.NewToolSession(name, proj.PrimaryRepo(), "lazygit")
+		case "terminal":
+			shell := os.Getenv("SHELL")
+			if shell == "" {
+				shell = "sh"
+			}
+			startErr = tmux.NewToolSession(name, proj.PrimaryRepo(), shell)
 		default: // "editor"
 			editor := os.Getenv("EDITOR")
 			if editor == "" {
@@ -956,14 +1027,7 @@ func (m Model) handleModalEnter() (tea.Model, tea.Cmd) {
 				break
 			}
 		}
-		script := fmt.Sprintf(
-			"tmux bind-key -n C-q detach-client; tmux attach-session -t '%s'; tmux unbind-key -n C-q 2>/dev/null",
-			name,
-		)
-		cmd := exec.Command("sh", "-c", script)
-		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
-			return attachDoneMsg{err: err}
-		})
+		return m, switchOrAttach(name)
 	}
 
 	return m, nil
@@ -1028,18 +1092,15 @@ func renderHelpBar(m Model) string {
 	}
 
 	bindings := []struct{ key, desc string }{
-		{"enter", "attach/expand"},
+		{"enter", "attach"},
 		{"n", "new session"},
-		{"N", "new project"},
-		{"v", "open in editor"},
-		{"V", "editor session"},
+		{"t/T", "terminal"},
+		{"v/V", "editor"},
 		{"G", "lazygit"},
-		{"space", "expand/collapse"},
-		{"d", "delete session"},
-		{"P", "restart session"},
-		{"e", "edit config"},
-		{"[/]", "resize sidebar"},
-		{"q/ctrl+q", "quit"},
+		{"d", "delete"},
+		{"N", "new project"},
+		{"?", "help"},
+		{"q", "quit"},
 	}
 	var parts []string
 	for _, b := range bindings {

@@ -15,7 +15,7 @@ type Session struct {
 }
 
 func (s Session) IsToolSession() bool {
-	return s.Kind == "editor" || s.Kind == "lazygit"
+	return s.Kind == "editor" || s.Kind == "lazygit" || s.Kind == "terminal"
 }
 
 type Project struct {

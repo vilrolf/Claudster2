@@ -131,6 +131,8 @@ func toolIcon(kind string, running bool) string {
 	switch kind {
 	case "lazygit":
 		return lipgloss.NewStyle().Foreground(ColorSubtle).Render("⎇")
+	case "terminal":
+		return lipgloss.NewStyle().Foreground(ColorSubtle).Render("$")
 	default: // editor
 		return lipgloss.NewStyle().Foreground(ColorSubtle).Render("✎")
 	}
@@ -143,6 +145,8 @@ func toolBadge(kind string, running bool) string {
 	switch kind {
 	case "lazygit":
 		return MutedItem.Render("  lazygit")
+	case "terminal":
+		return MutedItem.Render("  terminal")
 	default:
 		return MutedItem.Render("  editor")
 	}

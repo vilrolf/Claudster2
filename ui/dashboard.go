@@ -191,6 +191,9 @@ func renderCardGrid(m Model, w, h int) string {
 		var cards []cardData
 		for _, p := range g.Projects {
 			for _, s := range p.Sessions {
+				if s.IsToolSession() {
+					continue
+				}
 				anyCards = true
 				state := m.monitor.Get(s.Name)
 				running := tmux.SessionExists(s.Name)
@@ -351,6 +354,8 @@ func renderCard(m Model, c cardData) string {
 		switch c.session.Kind {
 		case "lazygit":
 			statusLine = MutedItem.Render("⎇  lazygit")
+		case "terminal":
+			statusLine = MutedItem.Render("$  terminal")
 		default:
 			statusLine = MutedItem.Render("✎  editor")
 		}
