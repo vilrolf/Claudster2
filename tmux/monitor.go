@@ -1,8 +1,11 @@
 package tmux
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -23,8 +26,9 @@ type State struct {
 }
 
 type Monitor struct {
-	mu          sync.RWMutex
-	states      map[string]*mstate
+	mu        sync.RWMutex
+	states    map[string]*mstate
+	doneTimes map[string]time.Time // persisted across restarts
 }
 
 type mstate struct {
@@ -34,8 +38,36 @@ type mstate struct {
 	lastChanged time.Time
 }
 
+func persistPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claudster.sessions.json")
+}
+
+func loadDoneTimes() map[string]time.Time {
+	data, err := os.ReadFile(persistPath())
+	if err != nil {
+		return map[string]time.Time{}
+	}
+	var m map[string]time.Time
+	if err := json.Unmarshal(data, &m); err != nil {
+		return map[string]time.Time{}
+	}
+	return m
+}
+
+func saveDoneTimes(m map[string]time.Time) {
+	data, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	os.WriteFile(persistPath(), data, 0644)
+}
+
 func NewMonitor() *Monitor {
-	return &Monitor{states: make(map[string]*mstate)}
+	return &Monitor{
+		states:    make(map[string]*mstate),
+		doneTimes: loadDoneTimes(),
+	}
 }
 
 // Poll updates the state for all given session names.
@@ -55,11 +87,19 @@ func (m *Monitor) Poll(sessions []string) {
 		}
 	}
 
+	persistDirty := false
+
 	for _, name := range sessions {
 		content := capturePane(name)
 		s, ok := m.states[name]
 		if !ok {
-			s = &mstate{lastChanged: time.Now(), lastContent: content}
+			// Zero lastChanged so time.Since(zero) is huge → isChanging = false
+			s = &mstate{lastChanged: time.Time{}, lastContent: content}
+			// Restore persisted Done state if we have one
+			if t, hasDone := m.doneTimes[name]; hasDone {
+				s.status = StatusDone
+				s.finishedAt = &t
+			}
 			m.states[name] = s
 		}
 
@@ -73,14 +113,26 @@ func (m *Monitor) Poll(sessions []string) {
 
 		switch {
 		case isChanging:
+			// Session became active again — clear any persisted done time
+			if s.status == StatusDone {
+				delete(m.doneTimes, name)
+				persistDirty = true
+			}
 			s.status = StatusWorking
+			s.finishedAt = nil
 		case wasWorking:
-			s.status = StatusDone
 			now := time.Now()
+			s.status = StatusDone
 			s.finishedAt = &now
+			m.doneTimes[name] = now
+			persistDirty = true
 		case s.status != StatusDone:
 			s.status = StatusIdle
 		}
+	}
+
+	if persistDirty {
+		saveDoneTimes(m.doneTimes)
 	}
 }
 
