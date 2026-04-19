@@ -289,7 +289,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.claudeStats = metrics.Stats(msg)
 
 	case attachDoneMsg:
-		return m, nil
+		return m, tea.EnableMouseAllMotion
 
 	case editorDoneMsg:
 		cfg, err := store.Load()
@@ -319,8 +319,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case tea.MouseButtonWheelUp:
 			m.moveUp()
+			return m, nil
 		case tea.MouseButtonWheelDown:
 			m.moveDown()
+			return m, nil
 		}
 
 	case tea.KeyMsg:
