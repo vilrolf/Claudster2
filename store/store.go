@@ -1,6 +1,7 @@
 package store
 
 import (
+	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+//go:embed default_config.yaml
+var defaultConfig []byte
 
 type Session struct {
 	Name string `yaml:"name"`
@@ -46,6 +50,7 @@ type Group struct {
 type UI struct {
 	SidebarWidth int    `yaml:"sidebar_width,omitempty"`
 	Editor       string `yaml:"editor,omitempty"`
+	GitClient    string `yaml:"git_client,omitempty"`
 }
 
 type Config struct {
@@ -61,10 +66,14 @@ func ConfigPath() string {
 func Load() (Config, error) {
 	data, err := os.ReadFile(ConfigPath())
 	if err != nil {
-		if os.IsNotExist(err) {
-			return Config{}, nil
+		if !os.IsNotExist(err) {
+			return Config{}, err
 		}
-		return Config{}, err
+		// First run — write the starter config so the user has something to edit.
+		if err := os.WriteFile(ConfigPath(), defaultConfig, 0644); err != nil {
+			return Config{}, fmt.Errorf("could not create config: %w", err)
+		}
+		data = defaultConfig
 	}
 	var c Config
 	if err := yaml.Unmarshal(data, &c); err != nil {

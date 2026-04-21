@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -406,7 +407,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startNewToolSession("editor"), nil
 
 	case "G":
-		return m.openInLazygit()
+		return m.openInGitClient()
 
 	case "t":
 		return m.openInTerminal()
@@ -422,7 +423,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		editor := resolveEditor(m.config.UI.Editor)
 		var cmd *exec.Cmd
 		if isVSCode(editor) {
-			cmd = exec.Command(editor, "--wait", store.ConfigPath())
+			cmd = exec.Command(editor, "--wait", wslPath(store.ConfigPath()))
 		} else {
 			cmd = exec.Command(editor, store.ConfigPath())
 		}
@@ -669,7 +670,7 @@ func (m Model) openInTerminal() (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m Model) openInLazygit() (tea.Model, tea.Cmd) {
+func (m Model) openInGitClient() (tea.Model, tea.Cmd) {
 	if m.cursor >= len(m.rows) {
 		return m, nil
 	}
@@ -684,7 +685,28 @@ func (m Model) openInLazygit() (tea.Model, tea.Cmd) {
 		m.setStatus("select a project or session first")
 		return m, nil
 	}
-	cmd := exec.Command("lazygit", "-p", tmux.ExpandPath(primaryRepo))
+	path := tmux.ExpandPath(primaryRepo)
+	client := m.config.UI.GitClient
+	if client == "" {
+		client = "lazygit"
+	}
+	if client == "github-desktop" {
+		var cmd *exec.Cmd
+		if runtime.GOOS == "darwin" {
+			cmd = exec.Command("open", "-a", "GitHub Desktop", path)
+		} else {
+			// Linux / WSL: GitHub Desktop installs a 'github' CLI helper.
+			cmd = exec.Command("github", path)
+		}
+		// GitHub Desktop is a GUI app — fire and forget, don't block the TUI.
+		return m, func() tea.Msg {
+			if err := cmd.Run(); err != nil {
+				return popupErrMsg("could not open GitHub Desktop: " + err.Error())
+			}
+			return nil
+		}
+	}
+	cmd := exec.Command(client, "-p", path)
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return editorDoneMsg{}
 	})
@@ -712,7 +734,7 @@ func (m Model) openInEditor() (tea.Model, tea.Cmd) {
 	var cmd *exec.Cmd
 	if isVSCode(editor) {
 		// Open folder in VS Code without --wait so claudster stays running.
-		cmd = exec.Command(editor, "--new-window", path)
+		cmd = exec.Command(editor, "--new-window", wslPath(path))
 	} else {
 		cmd = exec.Command(editor, path)
 	}
@@ -998,7 +1020,7 @@ func (m Model) handleModalEnter() (tea.Model, tea.Cmd) {
 		if isVSCode(editor) {
 			// VS Code uses --goto file:line syntax; --wait so we reload after edits.
 			editorCmd = exec.Command(editor, "--wait", "--goto",
-				fmt.Sprintf("%s:%d", store.ConfigPath(), line))
+				fmt.Sprintf("%s:%d", wslPath(store.ConfigPath()), line))
 		} else {
 			editorCmd = exec.Command(editor, fmt.Sprintf("+%d", line), store.ConfigPath())
 		}
@@ -1042,6 +1064,12 @@ func (m Model) handleModalEnter() (tea.Model, tea.Cmd) {
 		var startErr error
 		switch kind {
 		case "lazygit":
+			if m.config.UI.GitClient == "github-desktop" {
+				m.setStatus("GitHub Desktop doesn't run inside tmux — use G to open it instead")
+				m.modal.mode = modalNone
+				m.modal.input.Blur()
+				return m, nil
+			}
 			startErr = tmux.NewToolSession(name, proj.PrimaryRepo(), "lazygit")
 		case "terminal":
 			shell := os.Getenv("SHELL")
@@ -1159,6 +1187,13 @@ func (m Model) View() string {
 
 // ── shared helpers ────────────────────────────────────────────────────────────
 
+func gitClientLabel(configured string) string {
+	if configured == "github-desktop" {
+		return "GitHub Desktop"
+	}
+	return "lazygit"
+}
+
 func existingGroupHint(cfg store.Config) string {
 	var names []string
 	for _, g := range cfg.Groups {
@@ -1206,7 +1241,7 @@ func renderHelpBar(m Model) string {
 		{"r", "resume"},
 		{"t/T", "terminal"},
 		{"v/V", "editor"},
-		{"G", "lazygit"},
+		{"G", gitClientLabel(m.config.UI.GitClient)},
 		{"d", "delete"},
 		{"N", "new project"},
 		{"?", "help"},

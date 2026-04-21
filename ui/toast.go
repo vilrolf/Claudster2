@@ -53,12 +53,11 @@ func (m *Model) addToast(sessionName string) {
 		m.toasts = m.toasts[1:]
 	}
 	m.toasts = append(m.toasts, toast{sessionName: sessionName, createdAt: time.Now()})
-	newIdx := len(m.toasts) - 1
 	prev := m.tmuxBoundCount
 	m.tmuxBoundCount = len(m.toasts)
 	snapshot := append([]toast{}, m.toasts...)
 	go func() {
-		tmuxDisplayToast(sessionName, newIdx)
+		tmuxDisplayToast(sessionName)
 		tmuxSyncBindings(snapshot, prev)
 	}()
 }
@@ -94,11 +93,11 @@ func (m *Model) tickToasts() {
 
 // tmuxDisplayToast sends a display-message notification to every attached tmux
 // client so the user sees it regardless of which session they're in.
-func tmuxDisplayToast(name string, idx int) {
+func tmuxDisplayToast(name string) {
 	if os.Getenv("TMUX") == "" {
 		return
 	}
-	msg := fmt.Sprintf(" ✓ %s done  ·  %s+%d to jump ", name, metaKey(), idx+1)
+	msg := fmt.Sprintf(" ✓ %s done  ·  prefix+g to jump ", name)
 	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_name}").Output()
 	if err != nil {
 		return
@@ -108,20 +107,27 @@ func tmuxDisplayToast(name string, idx int) {
 	}
 }
 
-// tmuxSyncBindings keeps Alt+1..N tmux keybindings in sync with the active
-// toast list. Must be called in a goroutine — it shells out to tmux.
+// tmuxSyncBindings binds prefix+g to a display-menu listing all done sessions,
+// so the user can jump from anywhere in tmux without Alt key conflicts.
+// When there are no more toasts, the binding is removed.
 func tmuxSyncBindings(toasts []toast, prevCount int) {
 	if os.Getenv("TMUX") == "" {
 		return
 	}
+	if len(toasts) == 0 {
+		exec.Command("tmux", "unbind-key", "g").Run()
+		return
+	}
+	// Build: tmux bind-key g display-menu -T " ✓ Done " <label> <key> <cmd> ...
+	args := []string{"bind-key", "g", "display-menu", "-T", " ✓ Done sessions "}
 	for i, t := range toasts {
-		key := fmt.Sprintf("M-%d", i+1)
-		exec.Command("tmux", "bind-key", "-n", key, "switch-client", "-t", t.sessionName).Run()
+		args = append(args,
+			t.sessionName,
+			fmt.Sprintf("%d", i+1),
+			fmt.Sprintf("switch-client -t '%s'", t.sessionName),
+		)
 	}
-	for i := len(toasts); i < prevCount; i++ {
-		key := fmt.Sprintf("M-%d", i+1)
-		exec.Command("tmux", "unbind-key", "-n", key).Run()
-	}
+	exec.Command("tmux", args...).Run()
 }
 
 // jumpToToast moves the sidebar cursor to the session for toast idx, dismisses
@@ -173,7 +179,7 @@ func renderToastBox(t toast, idx int) string {
 	}
 
 	line1 := DoneBadge.Render("✓") + " " + NormalItem.Render(name)
-	keyHint := HelpKey.Render(fmt.Sprintf("%d", idx+1)) + HelpDesc.Render(" · "+metaKey()+fmt.Sprintf("+%d", idx+1)+" from anywhere")
+	keyHint := HelpKey.Render(fmt.Sprintf("%d", idx+1)) + HelpDesc.Render(" · prefix+g from tmux")
 	line2 := TimestampStyle.Render(ageStr) + HelpSep.Render("  ·  ") + keyHint
 
 	return toastStyle.Render(lipgloss.JoinVertical(lipgloss.Left, line1, line2))

@@ -49,6 +49,9 @@ func renderModal(m Model) string {
 		if m.modal.targetKind == "lazygit" {
 			title = fmt.Sprintf("New Lazygit Session — %s", m.modal.targetProject)
 			hint = "opens lazygit in " + primaryRepoHint(m)
+			if m.config.UI.GitClient == "github-desktop" {
+				hint = "note: GitHub Desktop doesn't run in tmux — use G to open it instead"
+			}
 		} else {
 			title = fmt.Sprintf("New Editor Session — %s", m.modal.targetProject)
 			hint = "opens " + resolveEditor(m.config.UI.Editor) + " in " + primaryRepoHint(m)
@@ -211,6 +214,17 @@ func resolveEditor(configured string) string {
 func isVSCode(editor string) bool {
 	base := filepath.Base(editor)
 	return base == "code" || base == "code-insiders"
+}
+
+// wslPath converts an absolute Linux path to a Windows path when running
+// under WSL, so VS Code (a Windows app) can open the file correctly.
+// On non-WSL systems it returns the path unchanged.
+func wslPath(path string) string {
+	out, err := exec.Command("wslpath", "-w", path).Output()
+	if err != nil {
+		return path
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func primaryRepoHint(m Model) string {

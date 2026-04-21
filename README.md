@@ -152,9 +152,9 @@ When creating a new session (`n` or `r`) you'll be asked whether to run with `--
 When a Claude session finishes, a toast appears in the corner. If you're in another tmux session at the time, a notification also flashes in your tmux status bar.
 
 - Press `1`–`9` in claudster to jump to that session
-- Press `opt+1`–`opt+9` (Mac) or `alt+1`–`alt+9` (Linux/WSL) from anywhere in tmux to jump directly
+- Press `prefix+g` from **anywhere in tmux** (including inside a Claude session) to open a menu of all finished sessions and switch to one
 
-> **Mac:** For `opt+N` to work, set Left Option Key to `Esc+` in iTerm2: Preferences → Profiles → Keys.
+> **tmux prefix** is `Ctrl+b` by default (or whatever you've set in your `~/.tmux.conf`). So the full sequence is: `Ctrl+b` → `g` → `1`/`2`/etc.
 
 ---
 
