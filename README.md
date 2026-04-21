@@ -49,12 +49,17 @@ groups:
           - name: feature-x
 ```
 
-Run claudster **inside tmux**:
+Run claudster **inside a tmux session**:
 
 ```bash
-tmux
+# Start a new tmux session named "claudster" and launch it
+tmux new-session -s claudster -d 'claudster' && tmux attach -t claudster
+
+# Or if you're already inside tmux, just run:
 claudster
 ```
+
+Claudster must run inside tmux — it creates and manages tmux sessions for each Claude conversation.
 
 ## Keybindings
 

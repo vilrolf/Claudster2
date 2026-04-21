@@ -16,6 +16,9 @@ func renderModal(m Model) string {
 	if m.modal.mode == modalHelp {
 		return renderHelp(m)
 	}
+	if m.modal.step == 1 {
+		return renderDangerousConfirm(m)
+	}
 
 	var title, fieldLabel, hint string
 
@@ -162,6 +165,24 @@ func renderConfirmDelete(m Model) string {
 		ErrorStyle.Render("y")+HelpSep.Render("  confirm    ")+HelpKey.Render("esc")+HelpSep.Render("  cancel"),
 	)
 
+	return lipgloss.Place(m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		OverlayStyle.Render(body),
+	)
+}
+
+func renderDangerousConfirm(m Model) string {
+	body := lipgloss.JoinVertical(lipgloss.Left,
+		OverlayTitle.Render("New Session — "+m.modal.targetProject),
+		"",
+		PreviewKey.Render("Session name:"),
+		NormalItem.PaddingLeft(2).Render(m.modal.pendingName),
+		"",
+		PreviewKey.Render("Run with --dangerously-skip-permissions?"),
+		HelpDesc.Render("Skips permission prompts. Only use if you trust the codebase."),
+		"",
+		HelpKey.Render("y")+" "+HelpDesc.Render("yes    ")+HelpKey.Render("n / enter")+" "+HelpDesc.Render("no    ")+HelpKey.Render("esc")+" "+HelpDesc.Render("cancel"),
+	)
 	return lipgloss.Place(m.width, m.height,
 		lipgloss.Center, lipgloss.Center,
 		OverlayStyle.Render(body),

@@ -63,6 +63,8 @@ type modalState struct {
 	input         textinput.Model
 	completions   []string // tab-cycle candidates (group names)
 	compIdx       int
+	step          int    // 0 = name input, 1 = dangerous mode confirm
+	pendingName   string // session name held between steps
 }
 
 func newModalState() modalState {
@@ -549,6 +551,8 @@ func (m Model) startNewSession() Model {
 	}
 	gi, pi := row.groupIdx, row.projectIdx
 	m.modal.mode = modalNewSession
+	m.modal.step = 0
+	m.modal.pendingName = ""
 	m.modal.targetGroup = m.config.Groups[gi].Name
 	m.modal.targetProject = m.config.Groups[gi].Projects[pi].Name
 	m.modal.input.Placeholder = "e.g. auth-refactor"
@@ -567,6 +571,8 @@ func (m Model) startResumeSession() Model {
 	}
 	gi, pi := row.groupIdx, row.projectIdx
 	m.modal.mode = modalResumeSession
+	m.modal.step = 0
+	m.modal.pendingName = ""
 	m.modal.targetGroup = m.config.Groups[gi].Name
 	m.modal.targetProject = m.config.Groups[gi].Projects[pi].Name
 	m.modal.input.Placeholder = "e.g. auth-refactor"
@@ -895,6 +901,23 @@ func (m Model) hitTestDashboardCard(absX, absY int) string {
 // ── modal keyboard ────────────────────────────────────────────────────────────
 
 func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Step 1: dangerous mode confirmation for new/resume session.
+	if m.modal.step == 1 {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			m.modal.mode = modalNone
+			m.modal.step = 0
+			return m, nil
+		case "y":
+			return m.commitSession(true)
+		case "n", "enter":
+			return m.commitSession(false)
+		}
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
@@ -910,9 +933,6 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.deleteSelected()
 			return m, nil
 		}
-	case "p":
-		m.dangerousMode = !m.dangerousMode
-		return m, nil
 	case "tab":
 		if m.modal.mode == modalNewProject {
 			m.cycleGroupCompletion()
@@ -968,89 +988,16 @@ func (m Model) handleModalEnter() (tea.Model, tea.Cmd) {
 			return editorDoneMsg{}
 		})
 
-	case modalNewSession:
+	case modalNewSession, modalResumeSession:
 		name := val
 		if m.allSessionNames()[name] {
 			m.setStatus(fmt.Sprintf("session %q already exists — names must be unique", name))
 			return m, nil
 		}
-		var proj *store.Project
-		for gi := range m.config.Groups {
-			if m.config.Groups[gi].Name == m.modal.targetGroup {
-				for pi := range m.config.Groups[gi].Projects {
-					if m.config.Groups[gi].Projects[pi].Name == m.modal.targetProject {
-						proj = &m.config.Groups[gi].Projects[pi]
-					}
-				}
-			}
-		}
-		if proj == nil {
-			m.setStatus("project not found")
-			m.modal.mode = modalNone
-			return m, nil
-		}
-
-		if err := tmux.NewSession(name, proj.PrimaryRepo(), proj.AdditionalRepos(), m.dangerousMode); err != nil {
-			m.setStatus(fmt.Sprintf("error: %v", err))
-			m.modal.mode = modalNone
-			m.modal.input.Blur()
-			return m, nil
-		}
-
-		m.config.AddSession(m.modal.targetGroup, m.modal.targetProject, store.Session{Name: name})
-		store.Save(m.config)
-		m.modal.mode = modalNone
+		m.modal.pendingName = name
+		m.modal.step = 1
 		m.modal.input.Blur()
-		m.rebuildRows()
-
-		for i, r := range m.rows {
-			if r.typ == rowTypeSession && r.label == name {
-				m.cursor = i
-				break
-			}
-		}
-
-		return m, switchOrAttach(name)
-
-	case modalResumeSession:
-		name := val
-		if m.allSessionNames()[name] {
-			m.setStatus(fmt.Sprintf("session %q already exists — names must be unique", name))
-			return m, nil
-		}
-		var proj *store.Project
-		for gi := range m.config.Groups {
-			if m.config.Groups[gi].Name == m.modal.targetGroup {
-				for pi := range m.config.Groups[gi].Projects {
-					if m.config.Groups[gi].Projects[pi].Name == m.modal.targetProject {
-						proj = &m.config.Groups[gi].Projects[pi]
-					}
-				}
-			}
-		}
-		if proj == nil {
-			m.setStatus("project not found")
-			m.modal.mode = modalNone
-			return m, nil
-		}
-		if err := tmux.NewResumeSession(name, proj.PrimaryRepo(), proj.AdditionalRepos(), m.dangerousMode); err != nil {
-			m.setStatus(fmt.Sprintf("error: %v", err))
-			m.modal.mode = modalNone
-			m.modal.input.Blur()
-			return m, nil
-		}
-		m.config.AddSession(m.modal.targetGroup, m.modal.targetProject, store.Session{Name: name})
-		store.Save(m.config)
-		m.modal.mode = modalNone
-		m.modal.input.Blur()
-		m.rebuildRows()
-		for i, r := range m.rows {
-			if r.typ == rowTypeSession && r.label == name {
-				m.cursor = i
-				break
-			}
-		}
-		return m, switchOrAttach(name)
+		return m, nil
 
 	case modalNewEditorSession:
 		name := val
@@ -1109,6 +1056,53 @@ func (m Model) handleModalEnter() (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// commitSession is called after the dangerous-mode confirmation step. It
+// creates the session and switches to it.
+func (m Model) commitSession(dangerous bool) (tea.Model, tea.Cmd) {
+	name := m.modal.pendingName
+	mode := m.modal.mode
+	m.modal.mode = modalNone
+	m.modal.step = 0
+	m.modal.pendingName = ""
+
+	var proj *store.Project
+	for gi := range m.config.Groups {
+		if m.config.Groups[gi].Name == m.modal.targetGroup {
+			for pi := range m.config.Groups[gi].Projects {
+				if m.config.Groups[gi].Projects[pi].Name == m.modal.targetProject {
+					proj = &m.config.Groups[gi].Projects[pi]
+				}
+			}
+		}
+	}
+	if proj == nil {
+		m.setStatus("project not found")
+		return m, nil
+	}
+
+	var err error
+	if mode == modalResumeSession {
+		err = tmux.NewResumeSession(name, proj.PrimaryRepo(), proj.AdditionalRepos(), dangerous)
+	} else {
+		err = tmux.NewSession(name, proj.PrimaryRepo(), proj.AdditionalRepos(), dangerous)
+	}
+	if err != nil {
+		m.setStatus(fmt.Sprintf("error: %v", err))
+		return m, nil
+	}
+
+	m.config.AddSession(m.modal.targetGroup, m.modal.targetProject, store.Session{Name: name})
+	store.Save(m.config)
+	m.rebuildRows()
+	for i, r := range m.rows {
+		if r.typ == rowTypeSession && r.label == name {
+			m.cursor = i
+			break
+		}
+	}
+	return m, switchOrAttach(name)
 }
 
 // ── View ──────────────────────────────────────────────────────────────────────
