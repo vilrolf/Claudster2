@@ -555,7 +555,7 @@ func (m Model) startNewSession() Model {
 		return m
 	}
 	row := m.rows[m.cursor]
-	if row.typ == rowTypeGroup {
+	if row.typ != rowTypeProject && row.typ != rowTypeSession {
 		return m
 	}
 	gi, pi := row.groupIdx, row.projectIdx
@@ -575,7 +575,7 @@ func (m Model) startResumeSession() Model {
 		return m
 	}
 	row := m.rows[m.cursor]
-	if row.typ == rowTypeGroup {
+	if row.typ != rowTypeProject && row.typ != rowTypeSession {
 		return m
 	}
 	gi, pi := row.groupIdx, row.projectIdx
