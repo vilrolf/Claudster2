@@ -13,8 +13,6 @@ import (
 	"claudster/ui"
 )
 
-const version = "dev"
-
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -22,7 +20,7 @@ func main() {
 			runUpdate()
 			return
 		case "version", "--version", "-v":
-			fmt.Println(version)
+			fmt.Println(ui.Version)
 			return
 		}
 	}

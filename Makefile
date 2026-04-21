@@ -1,9 +1,11 @@
 BIN=claudster
 INSTALL_PATH=/usr/local/bin/$(BIN)
 DIST=dist
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS=-ldflags "-X claudster/ui.Version=$(VERSION)"
 
 build:
-	go build -o $(BIN) .
+	go build $(LDFLAGS) -o $(BIN) .
 
 install: build
 	cp $(BIN) $(INSTALL_PATH)
@@ -16,10 +18,10 @@ uninstall:
 
 release:
 	mkdir -p $(DIST)
-	GOOS=darwin  GOARCH=arm64 go build -o $(DIST)/$(BIN)-darwin-arm64 .
-	GOOS=darwin  GOARCH=amd64 go build -o $(DIST)/$(BIN)-darwin-amd64 .
-	GOOS=linux   GOARCH=amd64 go build -o $(DIST)/$(BIN)-linux-amd64 .
-	GOOS=linux   GOARCH=arm64 go build -o $(DIST)/$(BIN)-linux-arm64 .
+	GOOS=darwin  GOARCH=arm64 go build $(LDFLAGS) -o $(DIST)/$(BIN)-darwin-arm64 .
+	GOOS=darwin  GOARCH=amd64 go build $(LDFLAGS) -o $(DIST)/$(BIN)-darwin-amd64 .
+	GOOS=linux   GOARCH=amd64 go build $(LDFLAGS) -o $(DIST)/$(BIN)-linux-amd64 .
+	GOOS=linux   GOARCH=arm64 go build $(LDFLAGS) -o $(DIST)/$(BIN)-linux-arm64 .
 	@echo ""
 	@echo "binaries in $(DIST)/:"
 	@ls -lh $(DIST)/

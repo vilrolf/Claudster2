@@ -13,7 +13,7 @@ import (
 func renderSidebar(m Model) string {
 	innerH := m.height - 3
 
-	title := PanelTitle.Render("claudster")
+	title := PanelTitle.Render("claudster") + "  " + MutedItem.Render(Version)
 	if m.dangerousMode {
 		title += "  " + ErrorStyle.Render("⚠ bypass")
 	}
