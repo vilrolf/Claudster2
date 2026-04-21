@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -11,6 +12,13 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 )
+
+func metaKey() string {
+	if runtime.GOOS == "darwin" {
+		return "opt"
+	}
+	return "alt"
+}
 
 const toastTTL = 10 * time.Second
 const toastMaxCount = 5
@@ -90,7 +98,7 @@ func tmuxDisplayToast(name string, idx int) {
 	if os.Getenv("TMUX") == "" {
 		return
 	}
-	msg := fmt.Sprintf(" ✓ %s done  ·  alt+%d to jump ", name, idx+1)
+	msg := fmt.Sprintf(" ✓ %s done  ·  %s+%d to jump ", name, metaKey(), idx+1)
 	out, err := exec.Command("tmux", "list-clients", "-F", "#{client_name}").Output()
 	if err != nil {
 		return
@@ -165,7 +173,7 @@ func renderToastBox(t toast, idx int) string {
 	}
 
 	line1 := DoneBadge.Render("✓") + " " + NormalItem.Render(name)
-	keyHint := HelpKey.Render(fmt.Sprintf("%d", idx+1)) + HelpDesc.Render(" jump")
+	keyHint := HelpKey.Render(fmt.Sprintf("%d", idx+1)) + HelpDesc.Render(" · "+metaKey()+fmt.Sprintf("+%d", idx+1)+" from anywhere")
 	line2 := TimestampStyle.Render(ageStr) + HelpSep.Render("  ·  ") + keyHint
 
 	return toastStyle.Render(lipgloss.JoinVertical(lipgloss.Left, line1, line2))

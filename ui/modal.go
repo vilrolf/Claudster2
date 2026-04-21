@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -22,7 +23,7 @@ func renderModal(m Model) string {
 	case modalNewProject:
 		title = "New Project"
 		fieldLabel = "Group:"
-		hint = "tab to autocomplete  ·  template opens in " + editorName()
+		hint = "tab to autocomplete  ·  template opens in " + resolveEditor()
 
 	case modalNewSession:
 		title = fmt.Sprintf("New Session — %s", m.modal.targetProject)
@@ -46,7 +47,7 @@ func renderModal(m Model) string {
 			hint = "opens lazygit in " + primaryRepoHint(m)
 		} else {
 			title = fmt.Sprintf("New Editor Session — %s", m.modal.targetProject)
-			hint = "opens " + editorName() + " in " + primaryRepoHint(m)
+			hint = "opens " + resolveEditor() + " in " + primaryRepoHint(m)
 		}
 		fieldLabel = "Session name:"
 	}
@@ -167,11 +168,16 @@ func renderConfirmDelete(m Model) string {
 	)
 }
 
-func editorName() string {
+func resolveEditor() string {
 	if e := os.Getenv("EDITOR"); e != "" {
 		return e
 	}
-	return "nvim"
+	for _, e := range []string{"nano", "vim", "vi"} {
+		if _, err := exec.LookPath(e); err == nil {
+			return e
+		}
+	}
+	return "vi"
 }
 
 func primaryRepoHint(m Model) string {

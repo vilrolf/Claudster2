@@ -417,10 +417,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "e":
-		editor := os.Getenv("EDITOR")
-		if editor == "" {
-			editor = "nvim"
-		}
+		editor := resolveEditor()
 		cmd := exec.Command(editor, store.ConfigPath())
 		return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 			return editorDoneMsg{}
@@ -700,10 +697,7 @@ func (m Model) openInEditor() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	path := tmux.ExpandPath(primaryRepo)
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = "nvim"
-	}
+	editor := resolveEditor()
 	cmd := exec.Command(editor, path)
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return editorDoneMsg{}
@@ -968,10 +962,7 @@ func (m Model) handleModalEnter() (tea.Model, tea.Cmd) {
 			m.setStatus(fmt.Sprintf("error: %v", err))
 			return m, nil
 		}
-		editor := os.Getenv("EDITOR")
-		if editor == "" {
-			editor = "nvim"
-		}
+		editor := resolveEditor()
 		editorCmd := exec.Command(editor, fmt.Sprintf("+%d", line), store.ConfigPath())
 		return m, tea.ExecProcess(editorCmd, func(err error) tea.Msg {
 			return editorDoneMsg{}
@@ -1094,10 +1085,7 @@ func (m Model) handleModalEnter() (tea.Model, tea.Cmd) {
 			}
 			startErr = tmux.NewToolSession(name, proj.PrimaryRepo(), shell)
 		default: // "editor"
-			editor := os.Getenv("EDITOR")
-			if editor == "" {
-				editor = "nvim"
-			}
+			editor := resolveEditor()
 			startErr = tmux.NewToolSession(name, proj.PrimaryRepo(), editor, tmux.ExpandPath(proj.PrimaryRepo()))
 		}
 		if startErr != nil {
