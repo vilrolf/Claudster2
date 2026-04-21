@@ -131,6 +131,9 @@ func New() Model {
 	}
 	m.rebuildRows()
 	m.pollMonitor()
+	if os.Getenv("TMUX") != "" {
+		exec.Command("tmux", "set-option", "-g", "mouse", "on").Run()
+	}
 	return m
 }
 
