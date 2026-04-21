@@ -158,6 +158,23 @@ When a Claude session finishes, a toast appears in the corner. If you're in anot
 
 ---
 
+## Scrolling
+
+To scroll up through session output, use tmux copy mode: `prefix+[`, scroll with the mouse wheel or arrow keys, then `q` to exit.
+
+For mouse wheel scrolling to work, tmux needs mouse mode enabled. Run this once to set it up permanently:
+
+```bash
+claudster setup
+tmux source ~/.tmux.conf
+```
+
+This adds `set -g mouse on` to your `~/.tmux.conf`.
+
+> **Note:** Even with mouse mode on, scrolling while Claude's input bar is focused may navigate command history instead of scrolling output. Use `prefix+[` for reliable scrolling in that case.
+
+---
+
 ## Build from source
 
 Requires Go 1.26+.

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -18,6 +19,9 @@ func main() {
 		switch os.Args[1] {
 		case "update":
 			runUpdate()
+			return
+		case "setup":
+			runSetup()
 			return
 		case "version", "--version", "-v":
 			fmt.Println(ui.Version)
@@ -34,6 +38,55 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func runSetup() {
+	tmuxConf := os.ExpandEnv("$HOME/.tmux.conf")
+	line := "set -g mouse on"
+
+	data, _ := os.ReadFile(tmuxConf)
+	if len(data) > 0 {
+		for _, l := range splitLines(string(data)) {
+			if strings.TrimSpace(l) == line {
+				fmt.Println("~/.tmux.conf already has 'set -g mouse on' — nothing to do.")
+				return
+			}
+		}
+	}
+
+	f, err := os.OpenFile(tmuxConf, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "could not write ~/.tmux.conf: %v\n", err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	prefix := ""
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		prefix = "\n"
+	}
+	if _, err := fmt.Fprintf(f, "%s# added by claudster setup\n%s\n", prefix, line); err != nil {
+		fmt.Fprintf(os.Stderr, "write failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Added 'set -g mouse on' to ~/.tmux.conf.")
+	fmt.Println("Reload tmux config with: tmux source ~/.tmux.conf")
+}
+
+func splitLines(s string) []string {
+	var out []string
+	start := 0
+	for i, c := range s {
+		if c == '\n' {
+			out = append(out, s[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		out = append(out, s[start:])
+	}
+	return out
 }
 
 func runUpdate() {
