@@ -17,6 +17,12 @@ func renderModal(m Model) string {
 	if m.modal.mode == modalHelp {
 		return renderHelp(m)
 	}
+	if m.modal.mode == modalAddTodo {
+		return renderAddTodo(m)
+	}
+	if m.modal.mode == modalRunTodoAgent {
+		return renderRunTodoAgent(m)
+	}
 	if m.modal.step == 1 {
 		return renderDangerousConfirm(m)
 	}
@@ -100,6 +106,12 @@ func renderHelp(m Model) string {
 			{"t", "open repo in terminal"},
 			{"G", "open repo in lazygit"},
 		}},
+		{"Todos", []binding{
+			{"tab", "toggle todos panel"},
+			{"a", "add manual todo"},
+			{"enter", "run agent on todo"},
+			{"D", "delete todo"},
+		}},
 		{"Project / config", []binding{
 			{"N", "new project"},
 			{"e", "edit config file"},
@@ -152,19 +164,30 @@ func renderHelp(m Model) string {
 }
 
 func renderConfirmDelete(m Model) string {
-	sessionName := ""
-	if m.cursor >= 0 && m.cursor < len(m.rows) {
-		sessionName = m.rows[m.cursor].label
+	var title, label, hint string
+	if m.sidebarMode == sidebarModeTodos {
+		title = "Delete Todo"
+		hint = "This will permanently remove the todo."
+		visibles := visibleTodos(m.todos.Todos, true)
+		if m.todoCursor < len(visibles) {
+			label = visibles[m.todoCursor].Title
+		}
+	} else {
+		title = "Delete Session"
+		hint = "This will kill the tmux session and remove it from config."
+		if m.cursor >= 0 && m.cursor < len(m.rows) {
+			label = m.rows[m.cursor].label
+		}
 	}
 
 	body := lipgloss.JoinVertical(lipgloss.Left,
-		OverlayTitle.Render("Delete Session"),
+		OverlayTitle.Render(title),
 		"",
 		HelpDesc.Render("Are you sure you want to delete:"),
 		"",
-		lipgloss.NewStyle().Foreground(ColorText).Bold(true).PaddingLeft(2).Render(sessionName),
+		lipgloss.NewStyle().Foreground(ColorText).Bold(true).PaddingLeft(2).Render(label),
 		"",
-		HelpDesc.Render("This will kill the tmux session and remove it from config."),
+		HelpDesc.Render(hint),
 		"",
 		ErrorStyle.Render("y")+HelpSep.Render("  confirm    ")+HelpKey.Render("esc")+HelpSep.Render("  cancel"),
 	)
@@ -238,4 +261,89 @@ func primaryRepoHint(m Model) string {
 		}
 	}
 	return "primary repo"
+}
+
+func renderAddTodo(m Model) string {
+	var fieldLabel, hint string
+	switch m.modal.step {
+	case 0:
+		fieldLabel = "Title:"
+		hint = ""
+	case 1:
+		fieldLabel = "Description:"
+		hint = "optional — enter to skip"
+	case 2:
+		fieldLabel = "Project:"
+		hint = "tab to autocomplete  ·  enter to skip"
+	}
+	var rows []string
+	rows = append(rows, OverlayTitle.Render("Add Todo"), "", PreviewKey.Render(fieldLabel))
+	if hint != "" {
+		rows = append(rows, HelpDesc.Render(hint))
+	}
+	rows = append(rows, InputStyle.Width(46).Render(m.modal.input.View()), "", HelpDesc.Render("enter  confirm    esc  cancel"))
+	body := lipgloss.JoinVertical(lipgloss.Left, rows...)
+	return lipgloss.Place(m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		OverlayStyle.Render(body),
+	)
+}
+
+func renderRunTodoAgent(m Model) string {
+	var title, fieldLabel, hint string
+	todo := m.modal.pendingTodo
+
+	todoLabel := ""
+	if todo != nil {
+		if todo.JiraKey != "" {
+			todoLabel = todo.JiraKey + ": " + todo.Title
+		} else {
+			todoLabel = todo.Title
+		}
+	}
+
+	switch m.modal.step {
+	case 0:
+		title = "Run Agent — " + todoLabel
+		fieldLabel = "Project:"
+		hint = "tab to autocomplete  ·  e.g. work/myapp"
+	case 1:
+		title = "Run Agent — " + todoLabel
+		fieldLabel = "Session name:"
+		hint = "starts in " + primaryRepoHint(m)
+	case 2:
+		return renderDangerousConfirmTodo(m, todoLabel)
+	}
+
+	body := lipgloss.JoinVertical(lipgloss.Left,
+		OverlayTitle.Render(title),
+		"",
+		PreviewKey.Render(fieldLabel),
+		HelpDesc.Render(hint),
+		InputStyle.Width(46).Render(m.modal.input.View()),
+		"",
+		HelpDesc.Render("enter  confirm    esc  cancel"),
+	)
+	return lipgloss.Place(m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		OverlayStyle.Render(body),
+	)
+}
+
+func renderDangerousConfirmTodo(m Model, todoLabel string) string {
+	body := lipgloss.JoinVertical(lipgloss.Left,
+		OverlayTitle.Render("Run Agent — "+todoLabel),
+		"",
+		PreviewKey.Render("Session name:"),
+		NormalItem.PaddingLeft(2).Render(m.modal.pendingName),
+		"",
+		PreviewKey.Render("Run with --dangerously-skip-permissions?"),
+		HelpDesc.Render("Skips permission prompts. Only use if you trust the codebase."),
+		"",
+		HelpKey.Render("y")+" "+HelpDesc.Render("yes    ")+HelpKey.Render("n / enter")+" "+HelpDesc.Render("no    ")+HelpKey.Render("esc")+" "+HelpDesc.Render("cancel"),
+	)
+	return lipgloss.Place(m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		OverlayStyle.Render(body),
+	)
 }

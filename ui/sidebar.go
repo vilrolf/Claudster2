@@ -11,13 +11,21 @@ import (
 )
 
 func renderSidebar(m Model) string {
+	if m.sidebarMode == sidebarModeTodos {
+		return renderTodosSidebar(m)
+	}
+	return renderSessionsSidebar(m)
+}
+
+func renderSessionsSidebar(m Model) string {
 	innerH := m.height - 3
 
 	title := PanelTitle.Render("claudster") + "  " + MutedItem.Render(Version)
 	if m.dangerousMode {
 		title += "  " + ErrorStyle.Render("⚠ bypass")
 	}
-	header := lipgloss.NewStyle().Padding(0, 1).Render(title)
+	modeTab := MutedItem.Render("sessions") + MutedItem.Render("  ·  ") + HelpDesc.Render("tab→todos")
+	header := lipgloss.NewStyle().Padding(0, 1).Render(title + "\n" + modeTab)
 
 	var lines []string
 
@@ -95,6 +103,84 @@ func renderSidebar(m Model) string {
 
 	content := strings.Join(lines, "\n")
 	// Clip to innerH so the sidebar border never overflows its allocated height.
+	body := clipLines(lipgloss.JoinVertical(lipgloss.Left, header, content), innerH)
+
+	return ActiveBorder.
+		Width(m.sidebarW).
+		Height(innerH).
+		Render(body)
+}
+
+func renderTodosSidebar(m Model) string {
+	innerH := m.height - 3
+
+	title := PanelTitle.Render("claudster") + "  " + MutedItem.Render(Version)
+	modeTab := HelpDesc.Render("tab→sessions") + MutedItem.Render("  ·  ") + PanelTitle.Render("todos")
+	header := lipgloss.NewStyle().Padding(0, 1).Render(title + "\n" + modeTab)
+
+	visibles := visibleTodos(m.todos.Todos, true)
+	groups := groupTodos(visibles)
+	order := todoGroupOrder(visibles)
+
+	var lines []string
+	cursor := 0
+
+	// Overview row (always present)
+	if m.todoCursor == -1 {
+		lines = append(lines, SelectedItem.PaddingLeft(1).Render("⊞  overview"))
+	} else {
+		lines = append(lines, NormalItem.PaddingLeft(1).Render("⊞  overview"))
+	}
+	lines = append(lines, "")
+
+	if len(visibles) == 0 {
+		lines = append(lines,
+			MutedItem.PaddingLeft(2).Render("no todos yet"),
+			"",
+			MutedItem.PaddingLeft(2).Render("a: add  ·  configure jira"),
+		)
+	} else {
+		for _, grp := range order {
+			items := groups[grp]
+			if len(items) == 0 {
+				continue
+			}
+			if len(lines) > 0 {
+				lines = append(lines, "")
+			}
+			lines = append(lines, lipgloss.NewStyle().
+				Foreground(ColorSubtle).
+				Bold(true).
+				PaddingLeft(1).
+				Render(grp))
+
+			for _, t := range items {
+				selected := cursor == m.todoCursor
+				icon := statusIcon(m, t)
+				var label string
+				if t.JiraKey != "" {
+					label = t.JiraKey
+				} else {
+					label = "note"
+				}
+				maxTitle := m.sidebarW - lipgloss.Width(icon) - lipgloss.Width(label) - 6
+				title := t.Title
+				if len(title) > maxTitle && maxTitle > 3 {
+					title = title[:maxTitle-1] + "…"
+				}
+				var line string
+				if selected {
+					line = "  " + icon + " " + SelectedItem.Render(label) + "  " + SelectedItem.Render(title)
+				} else {
+					line = "  " + icon + " " + MutedItem.Render(label) + "  " + MutedItem.Render(title)
+				}
+				lines = append(lines, line)
+				cursor++
+			}
+		}
+	}
+
+	content := strings.Join(lines, "\n")
 	body := clipLines(lipgloss.JoinVertical(lipgloss.Left, header, content), innerH)
 
 	return ActiveBorder.

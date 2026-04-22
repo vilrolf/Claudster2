@@ -40,6 +40,12 @@ var activityFrames = []string{
 func renderRightPanel(m Model) string {
 	innerH := m.height - 3
 
+	if m.sidebarMode == sidebarModeTodos {
+		content := clipLines(renderTodoDetail(m, m.dashW, innerH), innerH)
+		content = padLinesToWidth(strings.TrimRight(content, "\n"), m.dashW)
+		return InactiveBorder.Height(innerH).Render(content)
+	}
+
 	onOverview := m.cursor >= 0 && m.cursor < len(m.rows) && m.rows[m.cursor].typ == rowTypeOverview
 
 	var content string
@@ -417,6 +423,13 @@ func padLinesToWidth(content string, w int) string {
 
 func min(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
 		return a
 	}
 	return b

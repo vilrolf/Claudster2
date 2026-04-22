@@ -65,6 +65,26 @@ func NewResumeSession(name, path string, additionalRepos []string, dangerous boo
 	return nil
 }
 
+// NewSessionWithPrompt starts a Claude session with an initial prompt pre-filled.
+func NewSessionWithPrompt(name, path string, additionalRepos []string, dangerous bool, prompt string) error {
+	args := []string{"new-session", "-d", "-s", name, "-c", ExpandPath(path), "claude"}
+	for _, r := range additionalRepos {
+		args = append(args, "--add-dir", ExpandPath(r))
+	}
+	if dangerous {
+		args = append(args, "--dangerously-skip-permissions")
+	}
+	if prompt != "" {
+		args = append(args, prompt)
+	}
+	cmd := exec.Command("tmux", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, out)
+	}
+	return nil
+}
+
 // NewToolSession starts a tmux session running an arbitrary command.
 // programArgs are appended after program (e.g. pass the path for editors;
 // leave empty for tools like lazygit that use the working directory).

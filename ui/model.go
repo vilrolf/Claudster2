@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"claudster/jira"
 	"claudster/metrics"
 	"claudster/store"
 	"claudster/tmux"
@@ -39,6 +40,15 @@ type sidebarRow struct {
 	yPos       int // terminal Y for mouse hit-testing
 }
 
+// ── sidebar mode ──────────────────────────────────────────────────────────────
+
+type sidebarModeType int
+
+const (
+	sidebarModeSessions sidebarModeType = iota
+	sidebarModeTodos
+)
+
 // ── modal ─────────────────────────────────────────────────────────────────────
 
 type modalMode int
@@ -51,6 +61,8 @@ const (
 	modalNewEditorSession           // V / G / T
 	modalConfirmDelete              // d
 	modalHelp                       // ?
+	modalAddTodo                    // a (in todos view)
+	modalRunTodoAgent               // enter (in todos view) — multi-step: project → name → dangerous
 )
 
 // modalNewProject only needs one step (group name); the rest is done in $EDITOR.
@@ -62,10 +74,12 @@ type modalState struct {
 	targetProject string
 	targetKind    string // for modalNewEditorSession: "editor" or "lazygit"
 	input         textinput.Model
-	completions   []string // tab-cycle candidates (group names)
+	completions   []string // tab-cycle candidates (group names or project names)
 	compIdx       int
-	step          int    // 0 = name input, 1 = dangerous mode confirm
-	pendingName   string // session name held between steps
+	step          int        // 0 = name/project input, 1 = dangerous confirm (or session name for todo)
+	pendingName   string     // session name held between steps
+	pendingTodo   *store.Todo // todo being run as an agent
+	quickSpawn    bool       // skip session name + dangerous confirm, spawn immediately
 }
 
 func newModalState() modalState {
@@ -88,9 +102,9 @@ type Model struct {
 
 	modal modalState
 
-	spinFrame    int
-	spinTick     int
-	claudeStats  metrics.Stats
+	spinFrame     int
+	spinTick      int
+	claudeStats   metrics.Stats
 	dangerousMode bool
 
 	sidebarW int
@@ -103,7 +117,14 @@ type Model struct {
 	statusExp time.Time
 
 	toasts         []toast
-	tmuxBoundCount int // how many Alt+N tmux keys are currently bound
+	tmuxBoundCount int
+
+	// todos
+	sidebarMode  sidebarModeType
+	todos        store.TodoList
+	todoCursor   int
+	jiraFetching bool
+	jiraErr      string
 }
 
 type tickMsg time.Time
@@ -111,15 +132,22 @@ type attachDoneMsg struct{ err error }
 type editorDoneMsg struct{}
 type metricsMsg metrics.Stats
 type popupErrMsg string
+type jiraFetchDoneMsg struct {
+	todos  []store.Todo
+	errStr string
+}
 
 func New() Model {
 	cfg, cfgErr := store.Load()
+	todos, _ := store.LoadTodos()
 	m := Model{
-		config:   cfg,
-		monitor:  tmux.NewMonitor(),
-		expanded: make(map[string]bool),
-		yToRow:   make(map[int]int),
-		modal:    newModalState(),
+		config:       cfg,
+		monitor:      tmux.NewMonitor(),
+		expanded:     make(map[string]bool),
+		yToRow:       make(map[int]int),
+		modal:        newModalState(),
+		todos:        todos,
+		jiraFetching: cfg.Jira.URL != "",
 	}
 	if cfgErr != nil {
 		m.configErr = cfgErr.Error()
@@ -135,6 +163,17 @@ func New() Model {
 		exec.Command("tmux", "set-option", "-g", "mouse", "on").Run()
 	}
 	return m
+}
+
+func fetchJiraCmd(cfg store.JiraConfig) tea.Cmd {
+	return func() tea.Msg {
+		todos, err := jira.FetchAssigned(cfg)
+		errStr := ""
+		if err != nil {
+			errStr = err.Error()
+		}
+		return jiraFetchDoneMsg{todos: todos, errStr: errStr}
+	}
 }
 
 func (m *Model) allSessionNames() map[string]bool {
@@ -288,7 +327,11 @@ func tick() tea.Cmd {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tick()
+	cmds := []tea.Cmd{tick()}
+	if m.config.Jira.URL != "" {
+		cmds = append(cmds, fetchJiraCmd(m.config.Jira))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -314,6 +357,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case metricsMsg:
 		m.claudeStats = metrics.Stats(msg)
+
+	case jiraFetchDoneMsg:
+		m.jiraFetching = false
+		m.jiraErr = msg.errStr
+		if len(msg.todos) > 0 {
+			m.todos.MergeJiraTodos(msg.todos)
+			store.SaveTodos(m.todos)
+		}
 
 	case attachDoneMsg:
 		return m, tea.EnableMouseAllMotion
@@ -349,10 +400,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.handleMouseClick(msg.X, msg.Y)
 			}
 		case tea.MouseButtonWheelUp:
-			m.moveUp()
+			if m.sidebarMode == sidebarModeTodos {
+				m.todoMoveUp()
+			} else {
+				m.moveUp()
+			}
 			return m, nil
 		case tea.MouseButtonWheelDown:
-			m.moveDown()
+			if m.sidebarMode == sidebarModeTodos {
+				m.todoMoveDown()
+			} else {
+				m.moveDown()
+			}
 			return m, nil
 		}
 
@@ -373,6 +432,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "ctrl+c", "ctrl+q":
 		return m, tea.Quit
 
+	case "tab":
+		if m.sidebarMode == sidebarModeSessions {
+			m.sidebarMode = sidebarModeTodos
+			m.todoCursor = -1 // start on overview
+		} else {
+			m.sidebarMode = sidebarModeSessions
+		}
+		return m, nil
+	}
+
+	if m.sidebarMode == sidebarModeTodos {
+		return m.handleTodosKey(msg)
+	}
+
+	switch msg.String() {
 	case "j", "down":
 		m.moveDown()
 
@@ -465,6 +539,125 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) handleTodosKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visibles := visibleTodos(m.todos.Todos, true)
+	switch msg.String() {
+	case "j", "down":
+		if m.todoCursor == -1 && len(visibles) > 0 {
+			m.todoCursor = 0
+		} else if m.todoCursor >= 0 && m.todoCursor < len(visibles)-1 {
+			m.todoCursor++
+		}
+	case "k", "up":
+		if m.todoCursor > 0 {
+			m.todoCursor--
+		} else if m.todoCursor == 0 {
+			m.todoCursor = -1 // back to overview
+		}
+	case "s":
+		if m.todoCursor >= 0 && m.todoCursor < len(visibles) {
+			id := visibles[m.todoCursor].ID
+			for i, t := range m.todos.Todos {
+				if t.ID == id {
+					m.todos.Todos[i].Status = cycleStatus(t.Status)
+					break
+				}
+			}
+			store.SaveTodos(m.todos)
+		}
+	case "enter":
+		if m.todoCursor >= 0 && m.todoCursor < len(visibles) {
+			todo := visibles[m.todoCursor]
+			if todo.SessionName != "" {
+				return m, switchOrAttach(todo.SessionName)
+			}
+			if todo.GroupName != "" && todo.ProjectName != "" {
+				return m.quickSpawnTodo(todo)
+			}
+			// No project linked yet — ask for it, then auto-spawn
+			m.modal.pendingTodo = &todo
+			m.modal.mode = modalRunTodoAgent
+			m.modal.quickSpawn = true
+			m.modal.step = 0
+			m.modal.completions = nil
+			m.modal.input.Placeholder = existingProjectHint(m.config)
+			m.modal.input.SetValue("")
+			m.modal.input.Focus()
+		}
+	case "n":
+		if m.todoCursor >= 0 && m.todoCursor < len(visibles) {
+			todo := visibles[m.todoCursor]
+			m.modal.pendingTodo = &todo
+			m.modal.mode = modalRunTodoAgent
+			m.modal.quickSpawn = false
+			m.modal.completions = nil
+			if todo.GroupName != "" && todo.ProjectName != "" {
+				m.modal.targetGroup = todo.GroupName
+				m.modal.targetProject = todo.ProjectName
+				m.modal.step = 1
+				m.modal.input.Placeholder = "e.g. " + todoSessionName(&todo)
+				m.modal.input.SetValue(todoSessionName(&todo))
+			} else {
+				m.modal.step = 0
+				m.modal.input.Placeholder = existingProjectHint(m.config)
+				m.modal.input.SetValue("")
+			}
+			m.modal.input.Focus()
+		}
+	case "v":
+		if m.todoCursor >= 0 && m.todoCursor < len(visibles) {
+			return m.openTodoInEditor(visibles[m.todoCursor])
+		}
+	case "G":
+		if m.todoCursor >= 0 && m.todoCursor < len(visibles) {
+			return m.openTodoInGitClient(visibles[m.todoCursor])
+		}
+	case "t":
+		if m.todoCursor >= 0 && m.todoCursor < len(visibles) {
+			return m.openTodoInTerminal(visibles[m.todoCursor])
+		}
+	case "a":
+		m.modal.mode = modalAddTodo
+		m.modal.step = 0
+		m.modal.input.Placeholder = "e.g. Review PR from Tom"
+		m.modal.input.SetValue("")
+		m.modal.input.Focus()
+	case "d", "D":
+		if m.todoCursor >= 0 && m.todoCursor < len(visibles) {
+			m.modal.mode = modalConfirmDelete
+		}
+	case "?":
+		m.modal.mode = modalHelp
+	}
+	return m, nil
+}
+
+func removeTodoByID(todos []store.Todo, id string) []store.Todo {
+	out := make([]store.Todo, 0, len(todos))
+	for _, t := range todos {
+		if t.ID != id {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func existingProjectHint(cfg store.Config) string {
+	var names []string
+	for _, g := range cfg.Groups {
+		for _, p := range g.Projects {
+			names = append(names, g.Name+"/"+p.Name)
+		}
+	}
+	if len(names) == 0 {
+		return "e.g. work/myapp"
+	}
+	if len(names) > 3 {
+		names = names[:3]
+	}
+	return strings.Join(names, ", ")
+}
+
 func (m *Model) moveDown() {
 	next := m.cursor + 1
 	for next < len(m.rows) && m.rows[next].typ == rowTypeGroup {
@@ -482,6 +675,23 @@ func (m *Model) moveUp() {
 	}
 	if prev >= 0 {
 		m.cursor = prev
+	}
+}
+
+func (m *Model) todoMoveDown() {
+	visibles := visibleTodos(m.todos.Todos, true)
+	if m.todoCursor == -1 && len(visibles) > 0 {
+		m.todoCursor = 0
+	} else if m.todoCursor >= 0 && m.todoCursor < len(visibles)-1 {
+		m.todoCursor++
+	}
+}
+
+func (m *Model) todoMoveUp() {
+	if m.todoCursor > 0 {
+		m.todoCursor--
+	} else if m.todoCursor == 0 {
+		m.todoCursor = -1
 	}
 }
 
@@ -792,6 +1002,19 @@ func (m *Model) deleteSelected() {
 	m.rebuildRows()
 }
 
+func (m *Model) deleteSelectedTodo() {
+	visibles := visibleTodos(m.todos.Todos, true)
+	if m.todoCursor >= len(visibles) {
+		return
+	}
+	id := visibles[m.todoCursor].ID
+	m.todos.Todos = removeTodoByID(m.todos.Todos, id)
+	store.SaveTodos(m.todos)
+	if m.todoCursor >= len(m.todos.Todos) && m.todoCursor > 0 {
+		m.todoCursor = len(m.todos.Todos) - 1
+	}
+}
+
 // ── mouse ─────────────────────────────────────────────────────────────────────
 
 func (m Model) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
@@ -937,8 +1160,26 @@ func (m Model) hitTestDashboardCard(absX, absY int) string {
 // ── modal keyboard ────────────────────────────────────────────────────────────
 
 func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Step 1: dangerous mode confirmation for new/resume session.
-	if m.modal.step == 1 {
+	// Step 2: dangerous mode confirmation for todo run-agent.
+	if m.modal.mode == modalRunTodoAgent && m.modal.step == 2 {
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			m.modal.mode = modalNone
+			m.modal.step = 0
+			return m, nil
+		case "y":
+			return m.commitTodoSession(true)
+		case "n", "enter":
+			return m.commitTodoSession(false)
+		}
+		return m, nil
+	}
+
+	// Step 1: dangerous mode confirmation for new/resume session only.
+	// (modalAddTodo uses steps 0/1/2 for title/description/project — not dangerous confirm)
+	if m.modal.step == 1 && m.modal.mode != modalRunTodoAgent && m.modal.mode != modalAddTodo {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
@@ -966,12 +1207,21 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "y":
 		if m.modal.mode == modalConfirmDelete {
 			m.modal.mode = modalNone
-			m.deleteSelected()
+			if m.sidebarMode == sidebarModeTodos {
+				m.deleteSelectedTodo()
+			} else {
+				m.deleteSelected()
+			}
 			return m, nil
 		}
 	case "tab":
 		if m.modal.mode == modalNewProject {
 			m.cycleGroupCompletion()
+			return m, nil
+		}
+		if (m.modal.mode == modalRunTodoAgent && m.modal.step == 0) ||
+			(m.modal.mode == modalAddTodo && m.modal.step == 2) {
+			m.cycleProjectCompletion()
 			return m, nil
 		}
 	}
@@ -1001,13 +1251,119 @@ func (m *Model) cycleGroupCompletion() {
 	}
 }
 
+func (m *Model) cycleProjectCompletion() {
+	prefix := strings.ToLower(m.modal.input.Value())
+	if len(m.modal.completions) == 0 {
+		for _, g := range m.config.Groups {
+			for _, p := range g.Projects {
+				full := g.Name + "/" + p.Name
+				if strings.HasPrefix(strings.ToLower(full), prefix) {
+					m.modal.completions = append(m.modal.completions, full)
+				}
+			}
+		}
+		m.modal.compIdx = 0
+	} else {
+		m.modal.compIdx = (m.modal.compIdx + 1) % len(m.modal.completions)
+	}
+	if len(m.modal.completions) > 0 {
+		m.modal.input.SetValue(m.modal.completions[m.modal.compIdx])
+		m.modal.input.CursorEnd()
+	}
+}
+
 func (m Model) handleModalEnter() (tea.Model, tea.Cmd) {
 	val := strings.TrimSpace(m.modal.input.Value())
-	if val == "" {
+	// Allow empty value for description and project steps of add-todo.
+	if val == "" && !(m.modal.mode == modalAddTodo && m.modal.step >= 1) {
 		return m, nil
 	}
 
 	switch m.modal.mode {
+	case modalAddTodo:
+		switch m.modal.step {
+		case 0: // title
+			m.modal.pendingName = val
+			m.modal.step = 1
+			m.modal.input.Placeholder = "optional — enter to skip"
+			m.modal.input.SetValue("")
+			m.modal.completions = nil
+			m.modal.input.Focus()
+			return m, nil
+		case 1: // description
+			m.modal.targetKind = val // reuse targetKind to stash description
+			m.modal.step = 2
+			m.modal.input.Placeholder = existingProjectHint(m.config)
+			m.modal.input.SetValue("")
+			m.modal.completions = nil
+			m.modal.input.Focus()
+			return m, nil
+		case 2: // project
+			group, proj := resolveProjectInput(val, m.config)
+			if group == "" && val != "" {
+				m.setStatus("project not found — use group/project or tab to complete")
+				return m, nil
+			}
+			t := store.Todo{
+				ID:          store.NewTodoID(),
+				Title:       m.modal.pendingName,
+				Description: m.modal.targetKind,
+				Source:      "manual",
+				GroupName:   group,
+				ProjectName: proj,
+				CreatedAt:   time.Now(),
+			}
+			m.todos.Todos = append(m.todos.Todos, t)
+			store.SaveTodos(m.todos)
+			m.modal.mode = modalNone
+			m.modal.step = 0
+			m.modal.pendingName = ""
+			m.modal.targetKind = ""
+			m.modal.input.Blur()
+			m.todoCursor = len(m.todos.Todos) - 1
+			return m, nil
+		}
+
+	case modalRunTodoAgent:
+		switch m.modal.step {
+		case 0:
+			// val = "group/project" — resolve to group+project
+			group, proj := resolveProjectInput(val, m.config)
+			if group == "" {
+				m.setStatus("project not found — use group/project format or tab to complete")
+				return m, nil
+			}
+			m.modal.targetGroup = group
+			m.modal.targetProject = proj
+			m.modal.completions = nil
+			if m.modal.quickSpawn {
+				// Project was the only missing piece — spawn immediately
+				m.modal.mode = modalNone
+				todo := m.modal.pendingTodo
+				m.modal.pendingTodo = nil
+				if todo != nil {
+					todo.GroupName = group
+					todo.ProjectName = proj
+					return m.quickSpawnTodo(*todo)
+				}
+				return m, nil
+			}
+			m.modal.step = 1
+			m.modal.input.SetValue(todoSessionName(m.modal.pendingTodo))
+			m.modal.input.Focus()
+			return m, nil
+		case 1:
+			// val = session name
+			if m.allSessionNames()[val] {
+				m.setStatus(fmt.Sprintf("session %q already exists", val))
+				return m, nil
+			}
+			m.modal.pendingName = val
+			m.modal.step = 2
+			m.modal.input.Blur()
+			return m, nil
+		}
+
 	case modalNewProject:
 		// val = group name. Insert template + open editor.
 		group := val
@@ -1111,6 +1467,275 @@ func (m Model) handleModalEnter() (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m Model) todoProject(t store.Todo) *store.Project {
+	if t.GroupName == "" || t.ProjectName == "" {
+		return nil
+	}
+	for gi := range m.config.Groups {
+		if m.config.Groups[gi].Name == t.GroupName {
+			for pi := range m.config.Groups[gi].Projects {
+				if m.config.Groups[gi].Projects[pi].Name == t.ProjectName {
+					return &m.config.Groups[gi].Projects[pi]
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (m Model) openTodoInEditor(t store.Todo) (tea.Model, tea.Cmd) {
+	proj := m.todoProject(t)
+	if proj == nil {
+		m.setStatus("no project linked — run agent first to link a project")
+		return m, nil
+	}
+	// Temporarily point the cursor at a fake row so openInEditor can read the project.
+	// Simpler: just duplicate the open logic inline.
+	path := tmux.ExpandPath(proj.PrimaryRepo())
+	editor := resolveEditor(m.config.UI.Editor)
+	var cmd *exec.Cmd
+	if isVSCode(editor) {
+		cmd = exec.Command(editor, "--new-window", wslPath(path))
+	} else {
+		cmd = exec.Command(editor, path)
+	}
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg { return editorDoneMsg{} })
+}
+
+func (m Model) openTodoInGitClient(t store.Todo) (tea.Model, tea.Cmd) {
+	proj := m.todoProject(t)
+	if proj == nil {
+		m.setStatus("no project linked — run agent first to link a project")
+		return m, nil
+	}
+	path := tmux.ExpandPath(proj.PrimaryRepo())
+	client := m.config.UI.GitClient
+	if client == "" {
+		client = "lazygit"
+	}
+	if client == "github-desktop" {
+		var cmd *exec.Cmd
+		if runtime.GOOS == "darwin" {
+			cmd = exec.Command("open", "-a", "GitHub Desktop", path)
+		} else {
+			cmd = exec.Command("github", path)
+		}
+		return m, func() tea.Msg {
+			if err := cmd.Run(); err != nil {
+				return popupErrMsg("could not open GitHub Desktop: " + err.Error())
+			}
+			return nil
+		}
+	}
+	cmd := exec.Command(client, "-p", path)
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg { return editorDoneMsg{} })
+}
+
+func (m Model) openTodoInTerminal(t store.Todo) (tea.Model, tea.Cmd) {
+	proj := m.todoProject(t)
+	if proj == nil {
+		m.setStatus("no project linked — run agent first to link a project")
+		return m, nil
+	}
+	if os.Getenv("TMUX") == "" {
+		m.setStatus("t requires claudster to be running inside tmux")
+		return m, nil
+	}
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "sh"
+	}
+	expanded := tmux.ExpandPath(proj.PrimaryRepo())
+	return m, func() tea.Msg {
+		out, err := exec.Command("tmux", "display-popup",
+			"-E", "-d", expanded,
+			"-T", " ctrl-d to close ",
+			"-w", "80%", "-h", "80%",
+			shell,
+		).CombinedOutput()
+		if err != nil {
+			return popupErrMsg(string(out) + ": " + err.Error())
+		}
+		return nil
+	}
+}
+
+func (m Model) quickSpawnTodo(todo store.Todo) (tea.Model, tea.Cmd) {
+	var proj *store.Project
+	for gi := range m.config.Groups {
+		if m.config.Groups[gi].Name == todo.GroupName {
+			for pi := range m.config.Groups[gi].Projects {
+				if m.config.Groups[gi].Projects[pi].Name == todo.ProjectName {
+					proj = &m.config.Groups[gi].Projects[pi]
+				}
+			}
+		}
+	}
+	if proj == nil {
+		m.setStatus("project not found — use n to set it up")
+		return m, nil
+	}
+
+	name := uniqueSessionName(todoSessionName(&todo), m.allSessionNames())
+	prompt := todoPrompt(&todo)
+
+	if err := tmux.NewSessionWithPrompt(name, proj.PrimaryRepo(), proj.AdditionalRepos(), false, prompt); err != nil {
+		m.setStatus(fmt.Sprintf("error: %v", err))
+		return m, nil
+	}
+
+	for i, t := range m.todos.Todos {
+		if t.ID == todo.ID {
+			m.todos.Todos[i].SessionName = name
+			m.todos.Todos[i].Status = store.StatusInProgress
+			break
+		}
+	}
+	store.SaveTodos(m.todos)
+
+	m.config.AddSession(todo.GroupName, todo.ProjectName, store.Session{Name: name})
+	store.Save(m.config)
+	m.rebuildRows()
+	m.setStatus(fmt.Sprintf("started %s", name))
+	return m, nil
+}
+
+func uniqueSessionName(base string, existing map[string]bool) string {
+	if base == "" {
+		base = "todo"
+	}
+	if !existing[base] {
+		return base
+	}
+	for i := 2; ; i++ {
+		name := fmt.Sprintf("%s-%d", base, i)
+		if !existing[name] {
+			return name
+		}
+	}
+}
+
+func resolveProjectInput(val string, cfg store.Config) (group, proj string) {
+	parts := strings.SplitN(val, "/", 2)
+	if len(parts) == 2 {
+		g, p := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+		for _, grp := range cfg.Groups {
+			if strings.EqualFold(grp.Name, g) {
+				for _, pr := range grp.Projects {
+					if strings.EqualFold(pr.Name, p) {
+						return grp.Name, pr.Name
+					}
+				}
+			}
+		}
+	}
+	// Fall back: match project name alone
+	for _, grp := range cfg.Groups {
+		for _, pr := range grp.Projects {
+			if strings.EqualFold(pr.Name, val) {
+				return grp.Name, pr.Name
+			}
+		}
+	}
+	return "", ""
+}
+
+func todoSessionName(t *store.Todo) string {
+	if t == nil {
+		return ""
+	}
+	if t.JiraKey != "" {
+		return strings.ToLower(t.JiraKey)
+	}
+	s := strings.ToLower(t.Title)
+	s = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		if r == ' ' || r == '-' {
+			return '-'
+		}
+		return -1
+	}, s)
+	if len(s) > 24 {
+		s = s[:24]
+	}
+	return strings.Trim(s, "-")
+}
+
+func todoPrompt(t *store.Todo) string {
+	if t == nil {
+		return ""
+	}
+	var b strings.Builder
+	if t.JiraKey != "" {
+		b.WriteString(fmt.Sprintf("[%s] %s", t.JiraKey, t.Title))
+	} else {
+		b.WriteString(t.Title)
+	}
+	if t.Description != "" {
+		b.WriteString("\n\n")
+		b.WriteString(t.Description)
+	}
+	return b.String()
+}
+
+func (m Model) commitTodoSession(dangerous bool) (tea.Model, tea.Cmd) {
+	name := m.modal.pendingName
+	todo := m.modal.pendingTodo
+	m.modal.mode = modalNone
+	m.modal.step = 0
+	m.modal.pendingName = ""
+	m.modal.pendingTodo = nil
+
+	var proj *store.Project
+	for gi := range m.config.Groups {
+		if m.config.Groups[gi].Name == m.modal.targetGroup {
+			for pi := range m.config.Groups[gi].Projects {
+				if m.config.Groups[gi].Projects[pi].Name == m.modal.targetProject {
+					proj = &m.config.Groups[gi].Projects[pi]
+				}
+			}
+		}
+	}
+	if proj == nil {
+		m.setStatus("project not found")
+		return m, nil
+	}
+
+	prompt := todoPrompt(todo)
+	if err := tmux.NewSessionWithPrompt(name, proj.PrimaryRepo(), proj.AdditionalRepos(), dangerous, prompt); err != nil {
+		m.setStatus(fmt.Sprintf("error: %v", err))
+		return m, nil
+	}
+
+	// Link session name, project, and status back to the todo.
+	if todo != nil {
+		for i, t := range m.todos.Todos {
+			if t.ID == todo.ID {
+				m.todos.Todos[i].SessionName = name
+				m.todos.Todos[i].GroupName = m.modal.targetGroup
+				m.todos.Todos[i].ProjectName = m.modal.targetProject
+				m.todos.Todos[i].Status = store.StatusInProgress
+				break
+			}
+		}
+		store.SaveTodos(m.todos)
+	}
+
+	m.config.AddSession(m.modal.targetGroup, m.modal.targetProject, store.Session{Name: name})
+	store.Save(m.config)
+	m.rebuildRows()
+	for i, r := range m.rows {
+		if r.typ == rowTypeSession && r.label == name {
+			m.cursor = i
+			break
+		}
+	}
+	m.sidebarMode = sidebarModeSessions
+	return m, switchOrAttach(name)
 }
 
 // commitSession is called after the dangerous-mode confirmation step. It
@@ -1247,6 +1872,7 @@ func renderHelpBar(m Model) string {
 		{"G", gitClientLabel(m.config.UI.GitClient)},
 		{"d", "delete"},
 		{"N", "new project"},
+		{"tab", "todos"},
 		{"?", "help"},
 		{"q", "quit"},
 	}

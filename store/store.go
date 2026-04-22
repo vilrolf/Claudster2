@@ -53,9 +53,17 @@ type UI struct {
 	GitClient    string `yaml:"git_client,omitempty"`
 }
 
+type JiraConfig struct {
+	URL      string   `yaml:"url,omitempty"`
+	Email    string   `yaml:"email,omitempty"`
+	APIToken string   `yaml:"api_token,omitempty"`
+	Projects []string `yaml:"projects,omitempty"`
+}
+
 type Config struct {
-	Groups []Group `yaml:"groups"`
-	UI     UI      `yaml:"ui,omitempty"`
+	Groups []Group    `yaml:"groups"`
+	UI     UI         `yaml:"ui,omitempty"`
+	Jira   JiraConfig `yaml:"jira,omitempty"`
 }
 
 func ConfigPath() string {
