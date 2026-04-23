@@ -66,6 +66,27 @@ type Config struct {
 	Jira   JiraConfig `yaml:"jira,omitempty"`
 }
 
+// ScratchPath returns the path to the scratch file for a project.
+func ScratchPath(group, project string) string {
+	home, _ := os.UserHomeDir()
+	dir := filepath.Join(home, ".claudster-scratch")
+	os.MkdirAll(dir, 0755)
+	safe := strings.NewReplacer("/", "-", " ", "-").Replace
+	return filepath.Join(dir, safe(group)+"-"+safe(project)+".md")
+}
+
+// AppendScratch appends a bullet line to the project's scratch file.
+func AppendScratch(group, project, text string) error {
+	path := ScratchPath(group, project)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = fmt.Fprintf(f, "- %s\n", text)
+	return err
+}
+
 func ConfigPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".claudster.yaml")

@@ -22,6 +22,7 @@ type Todo struct {
 	Source      string    `yaml:"source"` // "manual" or "jira"
 	JiraKey     string    `yaml:"jira_key,omitempty"`
 	JiraProject string    `yaml:"jira_project,omitempty"`
+	Labels      []string  `yaml:"labels,omitempty"`
 	Status      string    `yaml:"status,omitempty"` // unstarted, in_progress, done
 	GroupName   string    `yaml:"group_name,omitempty"`
 	ProjectName string    `yaml:"project_name,omitempty"`
@@ -77,6 +78,7 @@ func (tl *TodoList) MergeJiraTodos(incoming []Todo) {
 		if i, exists := byKey[t.JiraKey]; exists {
 			tl.Todos[i].Title = t.Title
 			tl.Todos[i].Description = t.Description
+			tl.Todos[i].Labels = t.Labels
 		} else {
 			tl.Todos = append(tl.Todos, t)
 		}

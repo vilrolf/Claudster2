@@ -8,20 +8,31 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"claudster/skills"
 )
 
 func renderModal(m Model) string {
 	if m.modal.mode == modalConfirmDelete {
 		return renderConfirmDelete(m)
 	}
+	if m.modal.mode == modalConfirmSkillDelete {
+		return renderConfirmSkillDelete(m)
+	}
 	if m.modal.mode == modalHelp {
 		return renderHelp(m)
+	}
+	if m.modal.mode == modalScratchAppend {
+		return renderScratchAppend(m)
 	}
 	if m.modal.mode == modalAddTodo {
 		return renderAddTodo(m)
 	}
 	if m.modal.mode == modalRunTodoAgent {
 		return renderRunTodoAgent(m)
+	}
+	if m.modal.mode == modalSetStatus {
+		return renderSetStatus(m)
 	}
 	if m.modal.step == 1 {
 		return renderDangerousConfirm(m)
@@ -30,6 +41,15 @@ func renderModal(m Model) string {
 	var title, fieldLabel, hint string
 
 	switch m.modal.mode {
+	case modalNewSkill:
+		title = "New Skill"
+		fieldLabel = "Skill name:"
+		scopeLabel := "Global"
+		if m.modal.targetSkillScope != skills.GlobalDir() {
+			scopeLabel = filepath.Base(m.modal.targetSkillScope)
+		}
+		hint = fmt.Sprintf("scope: %s  ·  creates <scope>/<name>/SKILL.md", scopeLabel)
+
 	case modalNewProject:
 		title = "New Project"
 		fieldLabel = "Group:"
@@ -90,12 +110,15 @@ func renderHelp(m Model) string {
 		{"Navigate", []binding{
 			{"j / ↓", "move down"},
 			{"k / ↑", "move up"},
-			{"space", "expand / collapse project"},
+			{"ctrl+d / ctrl+u", "jump 5 rows down / up"},
+			{"/", "search sessions"},
+			{"space", "expand / collapse group"},
 		}},
 		{"Sessions", []binding{
 			{"enter", "attach or start session"},
 			{"n", "new Claude session"},
 			{"r", "resume Claude session (picker)"},
+			{"c", "scroll output (vim copy mode)"},
 			{"T", "new terminal session (persistent)"},
 			{"V", "new editor session (persistent)"},
 			{"d", "delete session (confirm required)"},
@@ -105,12 +128,21 @@ func renderHelp(m Model) string {
 			{"v", "open repo in editor"},
 			{"t", "open repo in terminal"},
 			{"G", "open repo in lazygit"},
+			{"s", "quick-add to scratch"},
+			{"S", "open full scratch file"},
 		}},
 		{"Todos", []binding{
 			{"tab", "toggle todos panel"},
 			{"a", "add manual todo"},
 			{"enter", "run agent on todo"},
-			{"D", "delete todo"},
+			{"o", "open Jira issue in browser"},
+			{"s", "set status"},
+			{"d", "delete todo"},
+		}},
+		{"Skills", []binding{
+			{"a", "new skill (in current scope)"},
+			{"enter / v", "edit skill in editor"},
+			{"d", "delete skill"},
 		}},
 		{"Project / config", []binding{
 			{"N", "new project"},
@@ -198,6 +230,40 @@ func renderConfirmDelete(m Model) string {
 	)
 }
 
+func renderConfirmSkillDelete(m Model) string {
+	body := lipgloss.JoinVertical(lipgloss.Left,
+		OverlayTitle.Render("Delete Skill"),
+		"",
+		HelpDesc.Render("Are you sure you want to delete:"),
+		"",
+		lipgloss.NewStyle().Foreground(ColorText).Bold(true).PaddingLeft(2).Render(m.modal.targetSkillName),
+		MutedItem.PaddingLeft(2).Render(m.modal.targetSkillDir),
+		"",
+		HelpDesc.Render("This will permanently remove the skill directory."),
+		"",
+		ErrorStyle.Render("y")+HelpSep.Render("  confirm    ")+HelpKey.Render("esc")+HelpSep.Render("  cancel"),
+	)
+	return lipgloss.Place(m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		OverlayStyle.Render(body),
+	)
+}
+
+func renderScratchAppend(m Model) string {
+	body := lipgloss.JoinVertical(lipgloss.Left,
+		OverlayTitle.Render("Scratch — "+m.modal.targetProject),
+		"",
+		HelpDesc.Render("Quick note (appended as a bullet):"),
+		InputStyle.Width(46).Render(m.modal.input.View()),
+		"",
+		HelpDesc.Render("enter  save    S  open full scratch    esc  cancel"),
+	)
+	return lipgloss.Place(m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		OverlayStyle.Render(body),
+	)
+}
+
 func renderDangerousConfirm(m Model) string {
 	body := lipgloss.JoinVertical(lipgloss.Left,
 		OverlayTitle.Render("New Session — "+m.modal.targetProject),
@@ -248,6 +314,15 @@ func wslPath(path string) string {
 		return path
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func openURL(url string) {
+	// WSL: use cmd.exe start
+	if err := exec.Command("cmd.exe", "/c", "start", "", url).Start(); err == nil {
+		return
+	}
+	// Linux fallback
+	exec.Command("xdg-open", url).Start()
 }
 
 func primaryRepoHint(m Model) string {
@@ -342,6 +417,34 @@ func renderDangerousConfirmTodo(m Model, todoLabel string) string {
 		"",
 		HelpKey.Render("y")+" "+HelpDesc.Render("yes    ")+HelpKey.Render("n / enter")+" "+HelpDesc.Render("no    ")+HelpKey.Render("esc")+" "+HelpDesc.Render("cancel"),
 	)
+	return lipgloss.Place(m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		OverlayStyle.Render(body),
+	)
+}
+
+func renderSetStatus(m Model) string {
+	type option struct{ icon, label string }
+	options := []option{
+		{MutedItem.Render("○"), "Unstarted"},
+		{WorkingBadge.Render("⟳"), "In Progress"},
+		{DoneBadge.Render("✓"), "Done"},
+	}
+
+	var rows []string
+	rows = append(rows, OverlayTitle.Render("Set Status"), "")
+	for i, opt := range options {
+		if i == m.modal.statusCursor {
+			cursor := SelectedItem.Render("▶ ")
+			label := SelectedItem.Bold(true).Render(opt.icon + "  " + opt.label)
+			rows = append(rows, lipgloss.NewStyle().PaddingLeft(2).Render(cursor+label))
+		} else {
+			rows = append(rows, MutedItem.PaddingLeft(4).Render(opt.icon+"  "+opt.label))
+		}
+	}
+	rows = append(rows, "", HelpDesc.Render("j/k  move    enter  confirm    esc  cancel"))
+
+	body := lipgloss.JoinVertical(lipgloss.Left, rows...)
 	return lipgloss.Place(m.width, m.height,
 		lipgloss.Center, lipgloss.Center,
 		OverlayStyle.Render(body),

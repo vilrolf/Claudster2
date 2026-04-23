@@ -1,11 +1,11 @@
 package jira
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -13,11 +13,13 @@ import (
 )
 
 type searchResponse struct {
+	Total  int `json:"total"`
 	Issues []struct {
 		Key    string `json:"key"`
 		Fields struct {
 			Summary     string      `json:"summary"`
 			Description interface{} `json:"description"`
+			Labels      []string    `json:"labels"`
 			Project     struct {
 				Key string `json:"key"`
 			} `json:"project"`
@@ -26,44 +28,48 @@ type searchResponse struct {
 }
 
 // FetchAssigned returns open Jira issues assigned to the current user for the configured projects.
-func FetchAssigned(cfg store.JiraConfig) ([]store.Todo, error) {
+func FetchAssigned(cfg store.JiraConfig) ([]store.Todo, int, error) {
 	if cfg.URL == "" || cfg.Email == "" || cfg.APIToken == "" {
-		return nil, nil
+		return nil, 0, nil
 	}
 
-	jql := "assignee = currentUser() AND statusCategory != Done"
+	jql := fmt.Sprintf("assignee = \"%s\" AND statusCategory != Done", cfg.Email)
 	if len(cfg.Projects) > 0 {
 		jql += fmt.Sprintf(" AND project in (%s)", strings.Join(cfg.Projects, ","))
 	}
 	jql += " ORDER BY updated DESC"
 
-	reqURL := fmt.Sprintf("%s/rest/api/3/search?jql=%s&maxResults=50&fields=summary,description,project",
-		strings.TrimRight(cfg.URL, "/"),
-		url.QueryEscape(jql),
-	)
+	reqURL := fmt.Sprintf("%s/rest/api/3/search/jql", strings.TrimRight(cfg.URL, "/"))
 
-	req, err := http.NewRequest("GET", reqURL, nil)
+	body, _ := json.Marshal(map[string]interface{}{
+		"jql":        jql,
+		"maxResults": 50,
+		"fields":     []string{"summary", "description", "project", "labels"},
+	})
+
+	req, err := http.NewRequest("POST", reqURL, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	auth := base64.StdEncoding.EncodeToString([]byte(cfg.Email + ":" + cfg.APIToken))
 	req.Header.Set("Authorization", "Basic "+auth)
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("jira returned HTTP %d", resp.StatusCode)
+		return nil, 0, fmt.Errorf("jira returned HTTP %d", resp.StatusCode)
 	}
 
 	var sr searchResponse
 	if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	todos := make([]store.Todo, 0, len(sr.Issues))
@@ -72,13 +78,14 @@ func FetchAssigned(cfg store.JiraConfig) ([]store.Todo, error) {
 			ID:          store.NewTodoID(),
 			Title:       i.Fields.Summary,
 			Description: extractDescription(i.Fields.Description),
+			Labels:      i.Fields.Labels,
 			Source:      "jira",
 			JiraKey:     i.Key,
 			JiraProject: i.Fields.Project.Key,
 			CreatedAt:   time.Now(),
 		})
 	}
-	return todos, nil
+	return todos, sr.Total, nil
 }
 
 func extractDescription(raw interface{}) string {

@@ -111,6 +111,12 @@ func renderTodosOverview(m Model, w int) string {
 		}
 	}
 
+	if m.jiraFetching {
+		return lipgloss.NewStyle().Padding(0, 1).Render(MutedItem.Render("fetching from Jira…"))
+	}
+	if m.jiraErr != "" {
+		return lipgloss.NewStyle().Padding(0, 1).Render(ErrorStyle.Render("jira error: " + m.jiraErr))
+	}
 	if len(todos) == 0 {
 		return lipgloss.NewStyle().Padding(0, 1).Render(MutedItem.Render("No todos yet — press a to add one"))
 	}
@@ -131,6 +137,27 @@ func renderTodosOverviewPanel(m Model, w, h int) string {
 	// Stats bar
 	lines = append(lines, renderTodosOverview(m, w))
 	lines = append(lines, MutedItem.Render(strings.Repeat("─", w-2)))
+	lines = append(lines, "")
+
+	// Debug: Jira config status
+	jiraURL := m.config.Jira.URL
+	if jiraURL == "" {
+		lines = append(lines, MutedItem.PaddingLeft(1).Render("jira: not configured"))
+	} else if m.jiraFetching {
+		lines = append(lines, WorkingBadge.PaddingLeft(1).Render("jira: fetching…"))
+	} else if m.jiraErr != "" {
+		lines = append(lines, ErrorStyle.PaddingLeft(1).Render("jira error: "+m.jiraErr))
+	} else {
+		nJira := 0
+		for _, t := range todos {
+			if t.Source == "jira" {
+				nJira++
+			}
+		}
+		lines = append(lines, DoneBadge.PaddingLeft(1).Render(
+			fmt.Sprintf("jira: synced — %d shown / %d total from API", nJira, m.jiraTotal),
+		))
+	}
 	lines = append(lines, "")
 
 	// In-progress items
@@ -259,6 +286,13 @@ func renderTodoDetail(m Model, w, h int) string {
 		statusDisplay = MutedItem.Render("unstarted")
 	}
 	lines = append(lines, PreviewKey.Render("status:")+"  "+statusDisplay)
+	if len(todo.Labels) > 0 {
+		var rendered []string
+		for _, l := range todo.Labels {
+			rendered = append(rendered, MutedItem.Render("["+l+"]"))
+		}
+		lines = append(lines, PreviewKey.Render("labels:")+"  "+strings.Join(rendered, " "))
+	}
 	lines = append(lines, "")
 	lines = append(lines, NormalItem.Bold(true).Render(todo.Title))
 
@@ -301,7 +335,11 @@ func renderTodoDetail(m Model, w, h int) string {
 		}
 	} else {
 		lines = append(lines, "")
-		lines = append(lines, MutedItem.Render("  enter: start  ·  n: setup  ·  s: cycle status"))
+		hint := "  enter: start  ·  n: setup  ·  s: cycle status"
+		if todo.JiraKey != "" {
+			hint += "  ·  o: open in Jira"
+		}
+		lines = append(lines, MutedItem.Render(hint))
 	}
 
 	return lipgloss.NewStyle().Padding(0, 1).Render(strings.Join(lines, "\n"))

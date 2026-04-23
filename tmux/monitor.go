@@ -29,6 +29,7 @@ type Monitor struct {
 	mu        sync.RWMutex
 	states    map[string]*mstate
 	doneTimes map[string]time.Time // persisted across restarts
+	liveSet   map[string]bool      // updated each Poll via list-sessions (one subprocess)
 }
 
 type mstate struct {
@@ -67,18 +68,40 @@ func NewMonitor() *Monitor {
 	return &Monitor{
 		states:    make(map[string]*mstate),
 		doneTimes: loadDoneTimes(),
+		liveSet:   make(map[string]bool),
 	}
+}
+
+// Exists reports whether a tmux session is currently alive, using the cached
+// result from the last Poll. Pure map lookup — no subprocess.
+func (m *Monitor) Exists(name string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.liveSet[name]
 }
 
 // Poll updates the state for all given session names.
 func (m *Monitor) Poll(sessions []string) {
+	// One subprocess to get all live sessions — replaces N has-session calls.
+	liveSet := make(map[string]bool)
+	if out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output(); err == nil {
+		for _, name := range strings.Fields(string(out)) {
+			liveSet[name] = true
+		}
+	}
+
+	// Only poll pane content for sessions that are actually alive.
 	alive := make(map[string]bool, len(sessions))
 	for _, name := range sessions {
-		alive[name] = true
+		if liveSet[name] {
+			alive[name] = true
+		}
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	m.liveSet = liveSet
 
 	// Mark removed sessions as dead
 	for name, s := range m.states {

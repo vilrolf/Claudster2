@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"claudster/metrics"
+	"claudster/skills"
 	"claudster/store"
 	"claudster/tmux"
 )
@@ -78,7 +79,7 @@ func renderOverview(m Model, w, h int) string {
 				if s.IsToolSession() {
 					continue
 				}
-				if !tmux.SessionExists(s.Name) {
+				if !m.monitor.Exists(s.Name) {
 					nStopped++
 					continue
 				}
@@ -202,7 +203,7 @@ func renderCardGrid(m Model, w, h int) string {
 				}
 				anyCards = true
 				state := m.monitor.Get(s.Name)
-				running := tmux.SessionExists(s.Name)
+				running := m.monitor.Exists(s.Name)
 				cards = append(cards, cardData{
 					session:  s,
 					project:  p,
@@ -262,13 +263,19 @@ func renderPreviewSection(m Model, w, h int) string {
 		return renderSessionPreview(m, row, w, h)
 	case rowTypeProject:
 		return renderProjectPreview(m, row, w, h)
+	case rowTypeSkill:
+		return renderSkillPreview(row, w, h)
+	case rowTypeSkillScope:
+		return renderSkillScopePreview(row, w, h)
+	case rowTypeSkillsHeader:
+		return renderSkillsHeaderPreview(w, h)
 	default:
 		return MutedItem.Padding(1, 2).Render("select a session to see details")
 	}
 }
 
 func renderSessionPreview(m Model, row sidebarRow, w, h int) string {
-	if !tmux.SessionExists(row.label) {
+	if !m.monitor.Exists(row.label) {
 		return lipgloss.NewStyle().Padding(1, 2).Render(
 			MutedItem.Render("session stopped — press enter to start"),
 		)
@@ -316,7 +323,7 @@ func renderProjectPreview(m Model, row sidebarRow, w, h int) string {
 
 	running := 0
 	for _, s := range proj.Sessions {
-		if tmux.SessionExists(s.Name) {
+		if m.monitor.Exists(s.Name) {
 			running++
 		}
 	}
@@ -333,6 +340,60 @@ func renderProjectPreview(m Model, row sidebarRow, w, h int) string {
 		lines = append(lines, MutedItem.Render("  press n to start a session"))
 	}
 
+	return lipgloss.NewStyle().Padding(0, 2).Render(strings.Join(lines, "\n"))
+}
+
+func renderSkillPreview(row sidebarRow, w, h int) string {
+	kv := func(k, v string) string {
+		return PreviewKey.Render(k+":") + " " + PreviewValue.Render(v)
+	}
+	scopeLabel := "Global"
+	if row.skillScope != skills.GlobalDir() {
+		scopeLabel = row.skillScope
+	}
+	content := skills.ReadContent(row.skillPath)
+	var lines []string
+	lines = append(lines, kv("skill", row.label))
+	lines = append(lines, kv("scope", scopeLabel))
+	lines = append(lines, kv("file", row.skillPath))
+	lines = append(lines, "")
+	lines = append(lines, PreviewKey.Render("content:"))
+	lines = append(lines, "")
+	if content == "" {
+		lines = append(lines, MutedItem.Render("  (empty)"))
+	} else {
+		for _, l := range strings.Split(strings.TrimRight(content, "\n"), "\n") {
+			lines = append(lines, PreviewComment.Render("  "+l))
+		}
+	}
+	lines = append(lines, "")
+	lines = append(lines, MutedItem.Render("  enter/v  edit    d  delete"))
+	return lipgloss.NewStyle().Padding(0, 2).Render(strings.Join(lines, "\n"))
+}
+
+func renderSkillScopePreview(row sidebarRow, w, h int) string {
+	kv := func(k, v string) string {
+		return PreviewKey.Render(k+":") + " " + PreviewValue.Render(v)
+	}
+	scopeDisplay := "Global  (~/.claude/skills/)"
+	if row.skillScope != skills.GlobalDir() {
+		scopeDisplay = row.label + "  (" + row.skillScope + ")"
+	}
+	var lines []string
+	lines = append(lines, kv("scope", scopeDisplay))
+	lines = append(lines, "")
+	lines = append(lines, MutedItem.Render("  a  add new skill in this scope"))
+	return lipgloss.NewStyle().Padding(0, 2).Render(strings.Join(lines, "\n"))
+}
+
+func renderSkillsHeaderPreview(w, h int) string {
+	var lines []string
+	lines = append(lines, PreviewKey.Render("Skills"))
+	lines = append(lines, "")
+	lines = append(lines, MutedItem.Render("  Navigate to a scope and press a to create a skill."))
+	lines = append(lines, "")
+	lines = append(lines, MutedItem.Render("  Global skills live in ~/.claude/skills/"))
+	lines = append(lines, MutedItem.Render("  Project skills live in <repo>/.claude/skills/"))
 	return lipgloss.NewStyle().Padding(0, 2).Render(strings.Join(lines, "\n"))
 }
 

@@ -42,16 +42,32 @@ func main() {
 
 func runSetup() {
 	tmuxConf := os.ExpandEnv("$HOME/.tmux.conf")
-	line := "set -g mouse on"
+
+	lines := []string{
+		"set -g mouse on",
+		"set-window-option -g mode-keys vi",
+	}
 
 	data, _ := os.ReadFile(tmuxConf)
-	if len(data) > 0 {
-		for _, l := range splitLines(string(data)) {
+	existing := string(data)
+
+	var toAdd []string
+	for _, line := range lines {
+		found := false
+		for _, l := range splitLines(existing) {
 			if strings.TrimSpace(l) == line {
-				fmt.Println("~/.tmux.conf already has 'set -g mouse on' — nothing to do.")
-				return
+				found = true
+				break
 			}
 		}
+		if !found {
+			toAdd = append(toAdd, line)
+		}
+	}
+
+	if len(toAdd) == 0 {
+		fmt.Println("~/.tmux.conf already configured — nothing to do.")
+		return
 	}
 
 	f, err := os.OpenFile(tmuxConf, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -65,13 +81,16 @@ func runSetup() {
 	if len(data) > 0 && data[len(data)-1] != '\n' {
 		prefix = "\n"
 	}
-	if _, err := fmt.Fprintf(f, "%s# added by claudster setup\n%s\n", prefix, line); err != nil {
+	block := prefix + "# added by claudster setup\n" + strings.Join(toAdd, "\n") + "\n"
+	if _, err := fmt.Fprint(f, block); err != nil {
 		fmt.Fprintf(os.Stderr, "write failed: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Println("Added 'set -g mouse on' to ~/.tmux.conf.")
-	fmt.Println("Reload tmux config with: tmux source ~/.tmux.conf")
+	for _, l := range toAdd {
+		fmt.Printf("Added: %s\n", l)
+	}
+	fmt.Println("\nReload with: tmux source ~/.tmux.conf")
 }
 
 func splitLines(s string) []string {

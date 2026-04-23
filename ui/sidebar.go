@@ -20,12 +20,18 @@ func renderSidebar(m Model) string {
 func renderSessionsSidebar(m Model) string {
 	innerH := m.height - 3
 
-	title := PanelTitle.Render("claudster") + "  " + MutedItem.Render(Version)
-	if m.dangerousMode {
-		title += "  " + ErrorStyle.Render("⚠ bypass")
+	var header string
+	if m.searchMode {
+		searchLine := HelpKey.Render("/") + " " + m.searchStr + "█"
+		header = lipgloss.NewStyle().Padding(0, 1).Render(searchLine)
+	} else {
+		title := PanelTitle.Render("claudster") + "  " + MutedItem.Render(Version)
+		if m.dangerousMode {
+			title += "  " + ErrorStyle.Render("⚠ bypass")
+		}
+		modeTab := MutedItem.Render("sessions") + MutedItem.Render("  ·  ") + HelpDesc.Render("tab→todos")
+		header = lipgloss.NewStyle().Padding(0, 1).Render(title + "\n" + modeTab)
 	}
-	modeTab := MutedItem.Render("sessions") + MutedItem.Render("  ·  ") + HelpDesc.Render("tab→todos")
-	header := lipgloss.NewStyle().Padding(0, 1).Render(title + "\n" + modeTab)
 
 	var lines []string
 
@@ -44,7 +50,6 @@ func renderSessionsSidebar(m Model) string {
 			MutedItem.PaddingLeft(2).Render("press N to add one"),
 		)
 	} else {
-		prevWasGroup := false
 		for i, row := range m.rows {
 			switch row.typ {
 			case rowTypeOverview:
@@ -59,15 +64,23 @@ func renderSessionsSidebar(m Model) string {
 				if i > 0 {
 					lines = append(lines, "")
 				}
-				lines = append(lines, lipgloss.NewStyle().
-					Foreground(ColorSubtle).
-					Bold(true).
-					PaddingLeft(1).
-					Render(row.label))
-				prevWasGroup = true
+				collapsed := m.groupCollapsed[row.groupIdx]
+				arrow := "▼"
+				if collapsed {
+					arrow = "▶"
+				}
+				label := arrow + " " + row.label
+				if i == m.cursor {
+					lines = append(lines, SelectedItem.Bold(true).PaddingLeft(1).Render(label))
+				} else {
+					lines = append(lines, lipgloss.NewStyle().
+						Foreground(ColorSubtle).
+						Bold(true).
+						PaddingLeft(1).
+						Render(label))
+				}
 
 			case rowTypeProject:
-				_ = prevWasGroup
 				key := expandKey(row.groupIdx, row.projectIdx)
 				arrow := "▶"
 				if m.expanded[key] {
@@ -78,7 +91,7 @@ func renderSessionsSidebar(m Model) string {
 				if !m.expanded[key] && len(proj.Sessions) > 0 {
 					running := 0
 					for _, s := range proj.Sessions {
-						if tmux.SessionExists(s.Name) {
+						if m.monitor.Exists(s.Name) {
 							running++
 						}
 					}
@@ -94,9 +107,33 @@ func renderSessionsSidebar(m Model) string {
 
 			case rowTypeSession:
 				state := m.monitor.Get(row.label)
-				running := tmux.SessionExists(row.label)
+				running := m.monitor.Exists(row.label)
 				sess := m.config.Groups[row.groupIdx].Projects[row.projectIdx].Sessions[row.sessionIdx]
 				lines = append(lines, renderSidebarSession(m, i, row, sess, state, running))
+
+			case rowTypeSkillsHeader:
+				lines = append(lines, "")
+				lines = append(lines, lipgloss.NewStyle().
+					Foreground(ColorSubtle).
+					Bold(true).
+					PaddingLeft(1).
+					Render("── "+row.label+" ──"))
+
+			case rowTypeSkillScope:
+				label := "  " + row.label
+				if i == m.cursor {
+					lines = append(lines, SelectedItem.PaddingLeft(1).Render(label))
+				} else {
+					lines = append(lines, NormalItem.PaddingLeft(1).Render(label))
+				}
+
+			case rowTypeSkill:
+				label := "✦ " + row.label
+				if i == m.cursor {
+					lines = append(lines, SelectedItem.PaddingLeft(3).Render(label))
+				} else {
+					lines = append(lines, MutedItem.PaddingLeft(3).Render(label))
+				}
 			}
 		}
 	}
@@ -244,7 +281,8 @@ func sidebarIcon(m Model, state tmux.State, running bool) string {
 	}
 	switch state.Status {
 	case tmux.StatusWorking:
-		return WorkingBadge.Render(spinner[m.spinFrame])
+		color := workingPalette[m.spinFrame%len(workingPalette)]
+		return lipgloss.NewStyle().Foreground(color).Render(spinner[m.spinFrame])
 	case tmux.StatusDone:
 		return DoneBadge.Render("✓")
 	default:

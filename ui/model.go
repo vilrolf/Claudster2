@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -14,11 +15,23 @@ import (
 
 	"claudster/jira"
 	"claudster/metrics"
+	"claudster/skills"
 	"claudster/store"
 	"claudster/tmux"
 )
 
-var spinner = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+var spinner = []string{"⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"}
+
+var workingPalette = []lipgloss.Color{
+	"#BB9AF7", // violet
+	"#9D7CD8", // purple
+	"#7AA2F7", // blue
+	"#41A6B5", // teal-blue
+	"#06B6D4", // cyan
+	"#41A6B5", // teal-blue
+	"#7AA2F7", // blue
+	"#9D7CD8", // purple
+}
 
 // ── row types ─────────────────────────────────────────────────────────────────
 
@@ -29,6 +42,9 @@ const (
 	rowTypeGroup
 	rowTypeProject
 	rowTypeSession
+	rowTypeSkillsHeader // non-selectable section divider
+	rowTypeSkillScope   // "Global" or a project scope
+	rowTypeSkill        // individual skill
 )
 
 type sidebarRow struct {
@@ -37,7 +53,9 @@ type sidebarRow struct {
 	groupIdx   int
 	projectIdx int
 	sessionIdx int
-	yPos       int // terminal Y for mouse hit-testing
+	skillPath  string // absolute path to SKILL.md
+	skillScope string // absolute path to the parent skills/ directory
+	yPos       int    // terminal Y for mouse hit-testing
 }
 
 // ── sidebar mode ──────────────────────────────────────────────────────────────
@@ -59,10 +77,14 @@ const (
 	modalNewSession                 // n
 	modalResumeSession              // r
 	modalNewEditorSession           // V / G / T
-	modalConfirmDelete              // d
+	modalConfirmDelete              // d on a session
 	modalHelp                       // ?
+	modalScratchAppend              // S — quick add to scratch
+	modalNewSkill                   // a on a skill scope/skill row
+	modalConfirmSkillDelete         // d on a skill row
 	modalAddTodo                    // a (in todos view)
 	modalRunTodoAgent               // enter (in todos view) — multi-step: project → name → dangerous
+	modalSetStatus                  // s (in todos view) — pick status with up/down
 )
 
 // modalNewProject only needs one step (group name); the rest is done in $EDITOR.
@@ -73,13 +95,18 @@ type modalState struct {
 	targetGroup   string
 	targetProject string
 	targetKind    string // for modalNewEditorSession: "editor" or "lazygit"
-	input         textinput.Model
-	completions   []string // tab-cycle candidates (group names or project names)
-	compIdx       int
-	step          int        // 0 = name/project input, 1 = dangerous confirm (or session name for todo)
-	pendingName   string     // session name held between steps
-	pendingTodo   *store.Todo // todo being run as an agent
+	// skill fields
+	targetSkillScope string // for modalNewSkill: absolute path to skills/ directory
+	targetSkillName  string // for modalConfirmSkillDelete: skill name to show
+	targetSkillDir   string // for modalConfirmSkillDelete: absolute skill directory to remove
+	input            textinput.Model
+	completions      []string // tab-cycle candidates (group names or project names)
+	compIdx          int
+	step             int        // 0 = name/project input, 1 = dangerous confirm (or session name for todo)
+	pendingName      string     // session name held between steps
+	pendingTodo      *store.Todo // todo being run as an agent
 	quickSpawn    bool       // skip session name + dangerous confirm, spawn immediately
+	statusCursor  int        // for modalSetStatus: 0=unstarted 1=in_progress 2=done
 }
 
 func newModalState() modalState {
@@ -95,10 +122,11 @@ type Model struct {
 	configErr string
 	monitor   *tmux.Monitor
 
-	rows     []sidebarRow
-	cursor   int
-	expanded map[string]bool
-	yToRow   map[int]int
+	rows           []sidebarRow
+	cursor         int
+	expanded       map[string]bool
+	groupCollapsed map[int]bool
+	yToRow         map[int]int
 
 	modal modalState
 
@@ -106,6 +134,9 @@ type Model struct {
 	spinTick      int
 	claudeStats   metrics.Stats
 	dangerousMode bool
+
+	skillsGlobal  []skills.Skill
+	skillsProject map[string][]skills.Skill
 
 	sidebarW int
 	dashW    int
@@ -119,21 +150,28 @@ type Model struct {
 	toasts         []toast
 	tmuxBoundCount int
 
+	searchMode bool
+	searchStr  string
+
 	// todos
 	sidebarMode  sidebarModeType
 	todos        store.TodoList
 	todoCursor   int
 	jiraFetching bool
+	jiraTotal    int
 	jiraErr      string
 }
 
 type tickMsg time.Time
+type pollTickMsg struct{}
+type pollDoneMsg struct{ doneTransitions []string }
 type attachDoneMsg struct{ err error }
 type editorDoneMsg struct{}
 type metricsMsg metrics.Stats
 type popupErrMsg string
 type jiraFetchDoneMsg struct {
 	todos  []store.Todo
+	total  int
 	errStr string
 }
 
@@ -141,13 +179,15 @@ func New() Model {
 	cfg, cfgErr := store.Load()
 	todos, _ := store.LoadTodos()
 	m := Model{
-		config:       cfg,
-		monitor:      tmux.NewMonitor(),
-		expanded:     make(map[string]bool),
-		yToRow:       make(map[int]int),
-		modal:        newModalState(),
-		todos:        todos,
-		jiraFetching: cfg.Jira.URL != "",
+		config:         cfg,
+		monitor:        tmux.NewMonitor(),
+		expanded:       make(map[string]bool),
+		groupCollapsed: make(map[int]bool),
+		yToRow:         make(map[int]int),
+		modal:          newModalState(),
+		skillsProject:  make(map[string][]skills.Skill),
+		todos:          todos,
+		jiraFetching:   cfg.Jira.URL != "",
 	}
 	if cfgErr != nil {
 		m.configErr = cfgErr.Error()
@@ -157,22 +197,39 @@ func New() Model {
 			m.expanded[expandKey(gi, pi)] = true
 		}
 	}
+	skills.Bootstrap()
+	m.scanSkills()
 	m.rebuildRows()
-	m.pollMonitor()
 	if os.Getenv("TMUX") != "" {
 		exec.Command("tmux", "set-option", "-g", "mouse", "on").Run()
+		exec.Command("tmux", "bind-key", "-n", "C-q", "switch-client", "-l").Run()
 	}
 	return m
 }
 
+func (m *Model) scanSkills() {
+	m.skillsGlobal = skills.ScanGlobal()
+	seen := make(map[string]bool)
+	for _, g := range m.config.Groups {
+		for _, p := range g.Projects {
+			repo := skills.ExpandPath(p.PrimaryRepo())
+			if seen[repo] {
+				continue
+			}
+			seen[repo] = true
+			m.skillsProject[repo] = skills.ScanProject(repo, p.Name)
+		}
+	}
+}
+
 func fetchJiraCmd(cfg store.JiraConfig) tea.Cmd {
 	return func() tea.Msg {
-		todos, err := jira.FetchAssigned(cfg)
+		todos, total, err := jira.FetchAssigned(cfg)
 		errStr := ""
 		if err != nil {
 			errStr = err.Error()
 		}
-		return jiraFetchDoneMsg{todos: todos, errStr: errStr}
+		return jiraFetchDoneMsg{todos: todos, total: total, errStr: errStr}
 	}
 }
 
@@ -212,6 +269,10 @@ func (m *Model) rebuildRows() {
 		})
 		yPos++
 
+		if m.groupCollapsed[gi] {
+			continue
+		}
+
 		for pi, p := range g.Projects {
 			rows = append(rows, sidebarRow{
 				typ: rowTypeProject, label: p.Name,
@@ -231,12 +292,82 @@ func (m *Model) rebuildRows() {
 		}
 	}
 
+	// Skills section
+	yPos++
+	rows = append(rows, sidebarRow{
+		typ: rowTypeSkillsHeader, label: "skills",
+		groupIdx: -1, projectIdx: -1, sessionIdx: -1, yPos: yPos,
+	})
+	yPos++
+
+	globalDir := skills.GlobalDir()
+	rows = append(rows, sidebarRow{
+		typ: rowTypeSkillScope, label: "Global",
+		skillScope: globalDir,
+		groupIdx: -1, projectIdx: -1, sessionIdx: -1, yPos: yPos,
+	})
+	yPos++
+	for _, sk := range m.skillsGlobal {
+		rows = append(rows, sidebarRow{
+			typ: rowTypeSkill, label: sk.Name,
+			skillPath: sk.FilePath, skillScope: sk.ScopeDir,
+			groupIdx: -1, projectIdx: -1, sessionIdx: -1, yPos: yPos,
+		})
+		yPos++
+	}
+
+	type scopeEntry struct {
+		key    string
+		label  string
+		skills []skills.Skill
+	}
+	var projectScopes []scopeEntry
+	seenScope := make(map[string]bool)
+	for _, g := range m.config.Groups {
+		for _, p := range g.Projects {
+			repo := skills.ExpandPath(p.PrimaryRepo())
+			if seenScope[repo] {
+				continue
+			}
+			seenScope[repo] = true
+			projSkills := m.skillsProject[repo]
+			if len(projSkills) == 0 {
+				continue
+			}
+			projectScopes = append(projectScopes, scopeEntry{
+				key:    repo,
+				label:  p.Name,
+				skills: projSkills,
+			})
+		}
+	}
+	for _, sg := range projectScopes {
+		rows = append(rows, sidebarRow{
+			typ: rowTypeSkillScope, label: sg.label,
+			skillScope: skills.ProjectDir(sg.key),
+			groupIdx: -1, projectIdx: -1, sessionIdx: -1, yPos: yPos,
+		})
+		yPos++
+		for _, sk := range sg.skills {
+			rows = append(rows, sidebarRow{
+				typ: rowTypeSkill, label: sk.Name,
+				skillPath: sk.FilePath, skillScope: sk.ScopeDir,
+				groupIdx: -1, projectIdx: -1, sessionIdx: -1, yPos: yPos,
+			})
+			yPos++
+		}
+	}
+
 	m.rows = rows
 	m.yToRow = make(map[int]int, len(rows))
 	for i, r := range rows {
 		m.yToRow[r.yPos] = i
 	}
 	m.clampCursor()
+}
+
+func nonSelectable(t rowType) bool {
+	return t == rowTypeSkillsHeader
 }
 
 func (m *Model) clampCursor() {
@@ -249,12 +380,12 @@ func (m *Model) clampCursor() {
 	if m.cursor < 0 {
 		m.cursor = 0
 	}
-	for m.cursor < len(m.rows) && m.rows[m.cursor].typ == rowTypeGroup {
+	for m.cursor < len(m.rows) && nonSelectable(m.rows[m.cursor].typ) {
 		m.cursor++
 	}
 	if m.cursor >= len(m.rows) {
 		m.cursor = len(m.rows) - 1
-		for m.cursor > 0 && m.rows[m.cursor].typ == rowTypeGroup {
+		for m.cursor > 0 && nonSelectable(m.rows[m.cursor].typ) {
 			m.cursor--
 		}
 	}
@@ -264,7 +395,7 @@ func (m *Model) clampCursor() {
 	}
 }
 
-func (m *Model) pollMonitor() {
+func (m Model) pollCmd() tea.Cmd {
 	var allNames []string
 	var claudeNames []string
 	for _, g := range m.config.Groups {
@@ -277,16 +408,20 @@ func (m *Model) pollMonitor() {
 			}
 		}
 	}
-	// Snapshot Claude session statuses before polling to detect Working→Done transitions.
 	prev := make(map[string]tmux.Status, len(claudeNames))
 	for _, n := range claudeNames {
 		prev[n] = m.monitor.Get(n).Status
 	}
-	m.monitor.Poll(allNames)
-	for _, n := range claudeNames {
-		if prev[n] == tmux.StatusWorking && m.monitor.Get(n).Status == tmux.StatusDone {
-			m.addToast(n)
+	monitor := m.monitor
+	return func() tea.Msg {
+		monitor.Poll(allNames)
+		var done []string
+		for _, n := range claudeNames {
+			if prev[n] == tmux.StatusWorking && monitor.Get(n).Status == tmux.StatusDone {
+				done = append(done, n)
+			}
 		}
+		return pollDoneMsg{doneTransitions: done}
 	}
 }
 
@@ -321,13 +456,13 @@ func (m *Model) setStatus(msg string) {
 }
 
 func tick() tea.Cmd {
-	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{tick()}
+	cmds := []tea.Cmd{tick(), m.pollCmd()}
 	if m.config.Jira.URL != "" {
 		cmds = append(cmds, fetchJiraCmd(m.config.Jira))
 	}
@@ -345,15 +480,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		m.spinFrame = (m.spinFrame + 1) % len(spinner)
 		m.spinTick++
-		m.pollMonitor()
 		m.tickToasts()
 		cmds := []tea.Cmd{tick()}
-		if m.spinTick == 1 || m.spinTick%20 == 0 { // first tick, then every ~10 s
+		if m.spinTick%67 == 0 { // every ~10 s
 			cmds = append(cmds, func() tea.Msg {
 				return metricsMsg(metrics.Collect())
 			})
 		}
 		return m, tea.Batch(cmds...)
+
+	case pollTickMsg:
+		return m, m.pollCmd()
+
+	case pollDoneMsg:
+		for _, name := range msg.doneTransitions {
+			m.addToast(name)
+		}
+		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+			return pollTickMsg{}
+		})
 
 	case metricsMsg:
 		m.claudeStats = metrics.Stats(msg)
@@ -361,6 +506,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case jiraFetchDoneMsg:
 		m.jiraFetching = false
 		m.jiraErr = msg.errStr
+		m.jiraTotal = msg.total
 		if len(msg.todos) > 0 {
 			m.todos.MergeJiraTodos(msg.todos)
 			store.SaveTodos(m.todos)
@@ -389,6 +535,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		m.scanSkills()
 		m.rebuildRows()
 		m.recalcLayout()
 		return m, nil
@@ -419,6 +566,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.modal.mode != modalNone {
 			return m.handleModalKey(msg)
 		}
+		if m.searchMode {
+			return m.handleSearchKey(msg)
+		}
 		return m.handleKey(msg)
 	}
 
@@ -431,6 +581,35 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c", "ctrl+q":
 		return m, tea.Quit
+
+	case "/":
+		if m.sidebarMode == sidebarModeSessions {
+			m.searchMode = true
+			m.searchStr = ""
+			return m, nil
+		}
+
+	case "ctrl+d":
+		if m.sidebarMode == sidebarModeTodos {
+			for i := 0; i < 5; i++ {
+				m.todoMoveDown()
+			}
+		} else {
+			for i := 0; i < 5; i++ {
+				m.moveDown()
+			}
+		}
+
+	case "ctrl+u":
+		if m.sidebarMode == sidebarModeTodos {
+			for i := 0; i < 5; i++ {
+				m.todoMoveUp()
+			}
+		} else {
+			for i := 0; i < 5; i++ {
+				m.moveUp()
+			}
+		}
 
 	case "tab":
 		if m.sidebarMode == sidebarModeSessions {
@@ -468,6 +647,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "N":
 		return m.startNewProject(), nil
 
+	case "a":
+		return m.startNewSkill(), nil
+
 	case "d":
 		return m.startConfirmDelete(), nil
 
@@ -478,10 +660,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.restartCurrentSession()
 
 	case "v":
+		if m.cursor < len(m.rows) && m.rows[m.cursor].typ == rowTypeSkill {
+			return m.openSkillInEditor(m.rows[m.cursor])
+		}
 		return m.openInEditor()
 
 	case "V":
 		return m.startNewToolSession("editor"), nil
+
+	case "s":
+		return m.openScratchAppend()
+
+	case "S":
+		return m.openScratch()
+
+	case "c":
+		return m.enterCopyMode()
 
 	case "G":
 		return m.openInGitClient()
@@ -539,6 +733,61 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *Model) jumpToTop() {
+	for i, r := range m.rows {
+		if !nonSelectable(r.typ) {
+			m.cursor = i
+			return
+		}
+	}
+}
+
+func (m *Model) jumpToBottom() {
+	for i := len(m.rows) - 1; i >= 0; i-- {
+		if !nonSelectable(m.rows[i].typ) {
+			m.cursor = i
+			return
+		}
+	}
+}
+
+func (m Model) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.searchMode = false
+		m.searchStr = ""
+	case "enter":
+		m.searchMode = false
+	case "backspace", "ctrl+h":
+		if len(m.searchStr) > 0 {
+			m.searchStr = m.searchStr[:len([]rune(m.searchStr))-1]
+			m.jumpToSearch()
+		}
+	default:
+		if len(msg.Runes) > 0 {
+			m.searchStr += string(msg.Runes)
+			m.jumpToSearch()
+		}
+	}
+	return m, nil
+}
+
+func (m *Model) jumpToSearch() {
+	if m.searchStr == "" {
+		return
+	}
+	q := strings.ToLower(m.searchStr)
+	for i, r := range m.rows {
+		if nonSelectable(r.typ) {
+			continue
+		}
+		if strings.Contains(strings.ToLower(r.label), q) {
+			m.cursor = i
+			return
+		}
+	}
+}
+
 func (m Model) handleTodosKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	visibles := visibleTodos(m.todos.Todos, true)
 	switch msg.String() {
@@ -556,14 +805,16 @@ func (m Model) handleTodosKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "s":
 		if m.todoCursor >= 0 && m.todoCursor < len(visibles) {
-			id := visibles[m.todoCursor].ID
-			for i, t := range m.todos.Todos {
-				if t.ID == id {
-					m.todos.Todos[i].Status = cycleStatus(t.Status)
-					break
-				}
+			todo := visibles[m.todoCursor]
+			statusIdx := map[string]int{
+				store.StatusUnstarted:  0,
+				store.StatusInProgress: 1,
+				store.StatusDone:       2,
+				"":                     0,
 			}
-			store.SaveTodos(m.todos)
+			m.modal.mode = modalSetStatus
+			m.modal.pendingTodo = &todo
+			m.modal.statusCursor = statusIdx[todo.Status]
 		}
 	case "enter":
 		if m.todoCursor >= 0 && m.todoCursor < len(visibles) {
@@ -616,6 +867,14 @@ func (m Model) handleTodosKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.todoCursor >= 0 && m.todoCursor < len(visibles) {
 			return m.openTodoInTerminal(visibles[m.todoCursor])
 		}
+	case "o":
+		if m.todoCursor >= 0 && m.todoCursor < len(visibles) {
+			todo := visibles[m.todoCursor]
+			if todo.JiraKey != "" {
+				issueURL := strings.TrimRight(m.config.Jira.URL, "/") + "/browse/" + todo.JiraKey
+				openURL(issueURL)
+			}
+		}
 	case "a":
 		m.modal.mode = modalAddTodo
 		m.modal.step = 0
@@ -660,7 +919,7 @@ func existingProjectHint(cfg store.Config) string {
 
 func (m *Model) moveDown() {
 	next := m.cursor + 1
-	for next < len(m.rows) && m.rows[next].typ == rowTypeGroup {
+	for next < len(m.rows) && nonSelectable(m.rows[next].typ) {
 		next++
 	}
 	if next < len(m.rows) {
@@ -670,7 +929,7 @@ func (m *Model) moveDown() {
 
 func (m *Model) moveUp() {
 	prev := m.cursor - 1
-	for prev >= 0 && m.rows[prev].typ == rowTypeGroup {
+	for prev >= 0 && nonSelectable(m.rows[prev].typ) {
 		prev--
 	}
 	if prev >= 0 {
@@ -700,17 +959,15 @@ func (m *Model) toggleExpand() {
 		return
 	}
 	row := m.rows[m.cursor]
-	var key string
 	switch row.typ {
-	case rowTypeProject:
-		key = expandKey(row.groupIdx, row.projectIdx)
-	case rowTypeSession:
-		key = expandKey(row.groupIdx, row.projectIdx)
-	default:
-		return
+	case rowTypeGroup:
+		m.groupCollapsed[row.groupIdx] = !m.groupCollapsed[row.groupIdx]
+		m.rebuildRows()
+	case rowTypeProject, rowTypeSession:
+		key := expandKey(row.groupIdx, row.projectIdx)
+		m.expanded[key] = !m.expanded[key]
+		m.rebuildRows()
 	}
-	m.expanded[key] = !m.expanded[key]
-	m.rebuildRows()
 }
 
 func (m Model) handleEnter() (tea.Model, tea.Cmd) {
@@ -720,12 +977,16 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	row := m.rows[m.cursor]
 
 	switch row.typ {
+	case rowTypeGroup:
+		m.toggleExpand()
+		return m, nil
+
 	case rowTypeProject:
 		m.toggleExpand()
 		return m, nil
 
 	case rowTypeSession:
-		if !tmux.SessionExists(row.label) {
+		if !m.monitor.Exists(row.label) {
 			// Start then attach
 			proj := &m.config.Groups[row.groupIdx].Projects[row.projectIdx]
 			if err := tmux.NewSession(row.label, proj.PrimaryRepo(), proj.AdditionalRepos(), m.dangerousMode); err != nil {
@@ -734,6 +995,9 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, switchOrAttach(row.label)
+
+	case rowTypeSkill:
+		return m.openSkillInEditor(row)
 	}
 
 	return m, nil
@@ -745,7 +1009,6 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 func switchOrAttach(name string) tea.Cmd {
 	if os.Getenv("TMUX") != "" {
 		return func() tea.Msg {
-			exec.Command("tmux", "bind-key", "-n", "C-q", "switch-client", "-l").Run()
 			tmux.SwitchTo(name)
 			return nil
 		}
@@ -804,11 +1067,151 @@ func (m Model) startConfirmDelete() Model {
 	if m.cursor >= len(m.rows) {
 		return m
 	}
-	if m.rows[m.cursor].typ != rowTypeSession {
+	row := m.rows[m.cursor]
+	switch row.typ {
+	case rowTypeSession:
+		m.modal.mode = modalConfirmDelete
+	case rowTypeSkill:
+		m.modal.mode = modalConfirmSkillDelete
+		m.modal.targetSkillName = row.label
+		m.modal.targetSkillDir = filepath.Dir(row.skillPath)
+	}
+	return m
+}
+
+func (m Model) startNewSkill() Model {
+	if m.cursor >= len(m.rows) {
 		return m
 	}
-	m.modal.mode = modalConfirmDelete
+	row := m.rows[m.cursor]
+	var scopeDir string
+	switch row.typ {
+	case rowTypeSkillScope:
+		scopeDir = row.skillScope
+	case rowTypeSkill:
+		scopeDir = row.skillScope
+	default:
+		scopeDir = skills.GlobalDir()
+	}
+	m.modal.mode = modalNewSkill
+	m.modal.targetSkillScope = scopeDir
+	m.modal.input.Placeholder = "e.g. typescript-style"
+	m.modal.input.SetValue("")
+	m.modal.input.Focus()
 	return m
+}
+
+func (m Model) openSkillInEditor(row sidebarRow) (tea.Model, tea.Cmd) {
+	editor := resolveEditor(m.config.UI.Editor)
+	var cmd *exec.Cmd
+	if isVSCode(editor) {
+		cmd = exec.Command(editor, "--wait", wslPath(row.skillPath))
+	} else {
+		cmd = exec.Command(editor, row.skillPath)
+	}
+	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return editorDoneMsg{}
+	})
+}
+
+func (m *Model) deleteSelectedSkill() {
+	if m.cursor >= len(m.rows) {
+		return
+	}
+	row := m.rows[m.cursor]
+	if row.typ != rowTypeSkill {
+		return
+	}
+	if err := skills.Delete(filepath.Dir(row.skillPath)); err != nil {
+		m.setStatus(fmt.Sprintf("error deleting skill: %v", err))
+	}
+	m.scanSkills()
+	if m.cursor > 0 {
+		m.cursor--
+	}
+	m.rebuildRows()
+}
+
+func (m Model) enterCopyMode() (tea.Model, tea.Cmd) {
+	if m.cursor >= len(m.rows) {
+		return m, nil
+	}
+	row := m.rows[m.cursor]
+	if row.typ != rowTypeSession {
+		return m, nil
+	}
+	name := row.label
+	if os.Getenv("TMUX") == "" || !m.monitor.Exists(name) {
+		return m, nil
+	}
+	return m, func() tea.Msg {
+		exec.Command("tmux", "copy-mode", "-t", name).Run()
+		exec.Command("tmux", "switch-client", "-t", name).Run()
+		return nil
+	}
+}
+
+func (m Model) scratchGroupProject() (string, string, bool) {
+	if m.cursor >= len(m.rows) {
+		return "", "", false
+	}
+	row := m.rows[m.cursor]
+	if row.typ != rowTypeProject && row.typ != rowTypeSession {
+		return "", "", false
+	}
+	g := m.config.Groups[row.groupIdx].Name
+	p := m.config.Groups[row.groupIdx].Projects[row.projectIdx].Name
+	return g, p, true
+}
+
+func (m Model) openScratch() (tea.Model, tea.Cmd) {
+	group, project, ok := m.scratchGroupProject()
+	if !ok {
+		return m, nil
+	}
+	path := store.ScratchPath(group, project)
+	editor := resolveEditor(m.config.UI.Editor)
+	if os.Getenv("TMUX") == "" {
+		var cmd *exec.Cmd
+		if isVSCode(editor) {
+			cmd = exec.Command(editor, "--wait", wslPath(path))
+		} else {
+			cmd = exec.Command(editor, path)
+		}
+		return m, tea.ExecProcess(cmd, func(err error) tea.Msg { return editorDoneMsg{} })
+	}
+	title := " ✎ " + project + " scratch "
+	return m, func() tea.Msg {
+		exec.Command("tmux", "display-popup",
+			"-E", "-T", title, "-w", "80%", "-h", "80%",
+			editor, path,
+		).Run()
+		return nil
+	}
+}
+
+func (m Model) openScratchAppend() (tea.Model, tea.Cmd) {
+	group, project, ok := m.scratchGroupProject()
+	if !ok {
+		return m, nil
+	}
+	path := store.ScratchPath(group, project)
+	title := " ✎ " + project + " scratch "
+	if os.Getenv("TMUX") == "" {
+		m.setStatus("scratch preview requires tmux")
+		return m, nil
+	}
+	editor := resolveEditor(m.config.UI.Editor)
+	var popupArgs []string
+	if isVSCode(editor) {
+		popupArgs = []string{"display-popup", "-E", "-T", title, "-w", "70%", "-h", "60%", editor, "--wait", wslPath(path)}
+	} else {
+		popupArgs = []string{"display-popup", "-E", "-T", title, "-w", "70%", "-h", "60%", editor, "+999999", path}
+	}
+	return m, func() tea.Msg {
+		exec.Command("tmux", popupArgs...).Run()
+		return nil
+	}
 }
 
 func (m Model) startNewToolSession(kind string) Model {
@@ -961,7 +1364,7 @@ func (m Model) restartCurrentSession() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	row := m.rows[m.cursor]
-	if row.typ != rowTypeSession || !tmux.SessionExists(row.label) {
+	if row.typ != rowTypeSession || !m.monitor.Exists(row.label) {
 		m.setStatus("select a running session first")
 		return m, nil
 	}
@@ -1028,8 +1431,11 @@ func (m Model) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 		switch row.typ {
 		case rowTypeOverview:
 			m.cursor = rowIdx
-		case rowTypeGroup:
+		case rowTypeSkillsHeader:
 			// no-op
+		case rowTypeGroup:
+			m.cursor = rowIdx
+			m.toggleExpand()
 		case rowTypeProject:
 			if m.cursor == rowIdx {
 				m.toggleExpand()
@@ -1039,6 +1445,13 @@ func (m Model) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 		case rowTypeSession:
 			if m.cursor == rowIdx {
 				return m.handleEnter()
+			}
+			m.cursor = rowIdx
+		case rowTypeSkillScope:
+			m.cursor = rowIdx
+		case rowTypeSkill:
+			if m.cursor == rowIdx {
+				return m.openSkillInEditor(row)
 			}
 			m.cursor = rowIdx
 		}
@@ -1099,7 +1512,7 @@ func (m Model) hitTestDashboardCard(absX, absY int) string {
 					continue
 				}
 				hasAnySessions = true
-				if tmux.SessionExists(s.Name) {
+				if m.monitor.Exists(s.Name) {
 					if m.monitor.Get(s.Name).Status == tmux.StatusWorking {
 						nWorking++
 					}
@@ -1160,6 +1573,38 @@ func (m Model) hitTestDashboardCard(absX, absY int) string {
 // ── modal keyboard ────────────────────────────────────────────────────────────
 
 func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.modal.mode == modalSetStatus {
+		statuses := []string{store.StatusUnstarted, store.StatusInProgress, store.StatusDone}
+		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			m.modal.mode = modalNone
+		case "j", "down":
+			if m.modal.statusCursor < 2 {
+				m.modal.statusCursor++
+			}
+		case "k", "up":
+			if m.modal.statusCursor > 0 {
+				m.modal.statusCursor--
+			}
+		case "enter":
+			if m.modal.pendingTodo != nil {
+				id := m.modal.pendingTodo.ID
+				newStatus := statuses[m.modal.statusCursor]
+				for i, t := range m.todos.Todos {
+					if t.ID == id {
+						m.todos.Todos[i].Status = newStatus
+						break
+					}
+				}
+				store.SaveTodos(m.todos)
+			}
+			m.modal.mode = modalNone
+		}
+		return m, nil
+	}
+
 	// Step 2: dangerous mode confirmation for todo run-agent.
 	if m.modal.mode == modalRunTodoAgent && m.modal.step == 2 {
 		switch msg.String() {
@@ -1212,6 +1657,11 @@ func (m Model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				m.deleteSelected()
 			}
+			return m, nil
+		}
+		if m.modal.mode == modalConfirmSkillDelete {
+			m.modal.mode = modalNone
+			m.deleteSelectedSkill()
 			return m, nil
 		}
 	case "tab":
@@ -1363,6 +1813,38 @@ func (m Model) handleModalEnter() (tea.Model, tea.Cmd) {
 			m.modal.input.Blur()
 			return m, nil
 		}
+
+	case modalNewSkill:
+		name := val
+		path, err := skills.Create(m.modal.targetSkillScope, name)
+		m.modal.mode = modalNone
+		m.modal.input.Blur()
+		if err != nil {
+			m.setStatus(fmt.Sprintf("error creating skill: %v", err))
+			return m, nil
+		}
+		m.scanSkills()
+		m.rebuildRows()
+		editor := resolveEditor(m.config.UI.Editor)
+		var editorCmd *exec.Cmd
+		if isVSCode(editor) {
+			editorCmd = exec.Command(editor, "--wait", wslPath(path))
+		} else {
+			editorCmd = exec.Command(editor, path)
+		}
+		return m, tea.ExecProcess(editorCmd, func(err error) tea.Msg {
+			return editorDoneMsg{}
+		})
+
+	case modalScratchAppend:
+		m.modal.mode = modalNone
+		m.modal.input.Blur()
+		if err := store.AppendScratch(m.modal.targetGroup, m.modal.targetProject, val); err != nil {
+			m.setStatus(fmt.Sprintf("scratch error: %v", err))
+		} else {
+			m.setStatus("added to scratch")
+		}
+		return m, nil
 
 	case modalNewProject:
 		// val = group name. Insert template + open editor.
